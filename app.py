@@ -11,21 +11,21 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from PIL import Image
 import streamlit as st
 
-# 페이지 기본 설정
+# 기본 페이지 설정
 st.set_page_config(
     page_title="출퇴근기록부 PDF/스캔본 ➡ 엑셀 변환기",
     page_icon="📊",
     layout="wide",
 )
 
-# Secrets 또는 기본 API Key 로드
+# Secrets 또는 코드에 전달된 API Key 로드
 GEMINI_API_KEY = st.secrets.get(
     "GEMINI_API_KEY",
     "AQ.Ab8RN6JtWgAd1P_oAikhVoxK0pwySrPvcF0ojsyk6L5_MWtWnA",
 )
 
 
-# --- Gemini Vision API 연동 (최신 모델 지정 및 503 재시도 로직) ---
+# --- Gemini Vision API 연동 (gemini-3.8-flash 적용 & 503 자동 재시도) ---
 def analyze_image_with_gemini(pil_img, api_key):
     client = genai.Client(api_key=api_key)
 
@@ -61,44 +61,32 @@ def analyze_image_with_gemini(pil_img, api_key):
         temperature=0.1,
     )
 
-    # 현재 정식 지원되는 최신 모델 목록
-    candidate_models = [
-        "gemini-2.5-flash",
-        "gemini-2.5-pro",
-    ]
-
+    # 503 과부하 발생 시 최대 3회 자동 재시도
     last_exception = None
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model="gemini-3.8-flash",  # 구글 권장 최신 모델
+                contents=[pil_img, prompt],
+                config=config,
+            )
+            if response and response.text:
+                data = json.loads(response.text)
+                if isinstance(data, dict):
+                    for k in data:
+                        if isinstance(data[k], list):
+                            return data[k]
+                return data
+        except Exception as e:
+            last_exception = e
+            err_msg = str(e)
+            if "503" in err_msg or "UNAVAILABLE" in err_msg:
+                time.sleep(2)  # 2초 대기 후 재시도
+                continue
+            else:
+                raise e
 
-    for model_name in candidate_models:
-        # 모델당 최대 3회 재시도 (503 트래픽 대비)
-        for attempt in range(3):
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=[pil_img, prompt],
-                    config=config,
-                )
-                if response and response.text:
-                    data = json.loads(response.text)
-                    if isinstance(data, dict):
-                        for k in data:
-                            if isinstance(data[k], list):
-                                return data[k]
-                    return data
-            except Exception as e:
-                last_exception = e
-                err_msg = str(e)
-                # 503 과부하 에러 발생 시 2초 지연 후 재시도
-                if "503" in err_msg or "UNAVAILABLE" in err_msg:
-                    time.sleep(2)
-                    continue
-                # 404 등 모델 없음 에러는 다음 대체 모델로 전환
-                elif "404" in err_msg or "NOT_FOUND" in err_msg:
-                    break
-                else:
-                    raise e
-
-    raise Exception(f"API 호출 실패 (최종 에러: {last_exception})")
+    raise Exception(f"AI 분석 처리 실패: {last_exception}")
 
 
 # --- 엑셀 작성 및 자동 시간/OT 계산 함수 ---
