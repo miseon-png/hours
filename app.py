@@ -13,24 +13,22 @@ import streamlit as st
 
 st.set_page_config(
     page_title="출퇴근기록부 PDF/스캔본 ➡ 엑셀 변환기",
-    page_icon="⚡",
+    page_icon="📋",
     layout="wide",
 )
 
-# 기본 제공 4개 키 (Secrets에 설정된 값이 있다면 그것을 최우선으로 사용)
+# 기본 API 키 및 Secrets 연동
 DEFAULT_KEYS = [
     "AQ.Ab8RN6JtWgAd1P_oAikhVoxK0pwySrPvcF0ojsyk6L5_MWtWnA",
-    "AQ.Ab8RN6J8OMxJlgeLoy0sDobVRL3_osnUmki1fehRQbIwF9E-cg",
-
 ]
 
-# Secrets 로드 (복수형 GEMINI_API_KEYS 또는 단일 GEMINI_API_KEY 대응)
 secrets_keys = st.secrets.get("GEMINI_API_KEYS", None)
 if not secrets_keys:
     single_key = st.secrets.get("GEMINI_API_KEY", None)
     secrets_keys = [single_key] if single_key else DEFAULT_KEYS
 
-API_KEYS = secrets_keys
+# 빈 값이나 잘못된 형식을 걸러낸 유효 키 목록
+API_KEYS = [k.strip() for k in secrets_keys if k and isinstance(k, str)]
 
 
 def compress_image_for_fast_api(pil_img, max_width=1024):
@@ -41,7 +39,6 @@ def compress_image_for_fast_api(pil_img, max_width=1024):
     return pil_img
 
 
-# 4개 다중 키 회피 파이프라인
 def analyze_image_fast(pil_img, api_keys):
     fast_img = compress_image_for_fast_api(pil_img)
 
@@ -59,11 +56,12 @@ def analyze_image_fast(pil_img, api_keys):
 
     last_exception = None
 
+    # 키 리스트 전체를 시도
     for idx, key in enumerate(api_keys, 1):
         try:
             client = genai.Client(api_key=key)
             response = client.models.generate_content(
-                model="gemini-3.8-flash",
+                model="gemini-2.5-flash",  # 구글 정식 지원 최신 모델
                 contents=[fast_img, prompt],
                 config=config,
             )
@@ -78,25 +76,12 @@ def analyze_image_fast(pil_img, api_keys):
             last_exception = e
             err_msg = str(e)
 
-            # 무료 한도 초과 감지 시 즉시 다음 Key로 스위칭
-            if (
-                "429" in err_msg
-                or "RESOURCE_EXHAUSTED" in err_msg
-                or "Quota" in err_msg
-            ):
-                st.toast(
-                    f"⚠️ API Key #{idx} 한도 소진. 다음 키(#{idx+1 if idx < len(api_keys) else 1})로 스위칭합니다."
-                )
-                continue
-            elif "503" in err_msg or "UNAVAILABLE" in err_msg:
-                time.sleep(1)
-                continue
-            else:
-                continue
+            # 에러 감지 시 어떤 에러든 다음 키로 자동 스위칭 시도
+            st.toast(f"⚠️ Key #{idx} 오류 감지 ({err_msg[:40]}...). 다음 키로 시도합니다.")
+            time.sleep(0.5)
+            continue
 
-    raise Exception(
-        f"모든 등록 키의 제한이 초과되었습니다. (최종 에러: {last_exception})"
-    )
+    raise Exception(f"모든 API 키 호출이 실패했습니다. (마지막 에러: {last_exception})")
 
 
 def create_excel_bytes(year, month, employee_data):
@@ -113,15 +98,9 @@ def create_excel_bytes(year, month, employee_data):
         left=border_thin, right=border_thin, top=border_thin, bottom=border_thin
     )
 
-    fill_header = PatternFill(
-        start_color="F2F2F2", end_color="F2F2F2", fill_type="solid"
-    )
-    fill_sat = PatternFill(
-        start_color="DCE6F1", end_color="DCE6F1", fill_type="solid"
-    )
-    fill_sun = PatternFill(
-        start_color="FCE4D6", end_color="FCE4D6", fill_type="solid"
-    )
+    fill_header = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+    fill_sat = PatternFill(start_color="DCE6F1", end_color="DCE6F1", fill_type="solid")
+    fill_sun = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
 
     ws.merge_cells("A1:AJ1")
     ws["A1"] = f"팜360닷에이아이 익산지점 생산파트 {year}년 {month}월 출퇴근기록부"
@@ -151,31 +130,14 @@ def create_excel_bytes(year, month, employee_data):
             c.font = font_bold
             c.alignment = align_center
             c.fill = (
-                fill_sat
-                if dt.weekday() == 5
-                else (fill_sun if dt.weekday() == 6 else fill_header)
+                fill_sat if dt.weekday() == 5 else (fill_sun if dt.weekday() == 6 else fill_header)
             )
 
     start_row = 4
     for emp in employee_data:
-        ws.merge_cells(
-            start_row=start_row,
-            start_column=1,
-            end_row=start_row + 3,
-            end_column=1,
-        )
-        ws.merge_cells(
-            start_row=start_row,
-            start_column=2,
-            end_row=start_row + 3,
-            end_column=2,
-        )
-        ws.merge_cells(
-            start_row=start_row,
-            start_column=3,
-            end_row=start_row + 3,
-            end_column=3,
-        )
+        ws.merge_cells(start_row=start_row, start_column=1, end_row=start_row + 3, end_column=1)
+        ws.merge_cells(start_row=start_row, start_column=2, end_row=start_row + 3, end_column=2)
+        ws.merge_cells(start_row=start_row, start_column=3, end_row=start_row + 3, end_column=3)
 
         ws.cell(row=start_row, column=1, value=emp.get("name", ""))
         ws.cell(row=start_row, column=2, value=emp.get("contract_type", ""))
@@ -269,7 +231,7 @@ if uploaded_file is not None:
 
     if st.button("🚀 AI 분석 및 엑셀 생성"):
         all_parsed_employees = []
-        with st.spinner("AI가 다중 키로 문서 분석 중입니다..."):
+        with st.spinner("AI 분석 진행 중..."):
             try:
                 if doc is not None:
                     for p in range(total_pages):
@@ -282,10 +244,8 @@ if uploaded_file is not None:
                     emp_list = analyze_image_fast(preview_image, API_KEYS)
                     all_parsed_employees.extend(emp_list)
 
-                excel_data = create_excel_bytes(
-                    year, month, all_parsed_employees
-                )
-                st.success("분석 완료!")
+                excel_data = create_excel_bytes(year, month, all_parsed_employees)
+                st.success("파싱 완료!")
                 st.download_button(
                     label="📥 엑셀 파일 다운로드",
                     data=excel_data,
@@ -293,4 +253,4 @@ if uploaded_file is not None:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
             except Exception as e:
-                st.error(f"분석 오류: {e}")
+                st.error(f"오류: {e}")
