@@ -9,43 +9,35 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from PIL import Image
 import streamlit as st
 
-# 페이지 기본 설정
+# 페이지 기본 설정 (사이드바 없이 메인 화면 위주 레이아웃)
 st.set_page_config(
-    page_title="출퇴근기록부 PDF/스캔본 ➡ 엑셀 변환기 (오픈소스 AI)",
+    page_title="출퇴근기록부 PDF/스캔본 ➡ 엑셀 변환기",
     page_icon="📊",
     layout="wide",
 )
 
 
-# --- Hugging Face / 오픈소스 Vision AI 파이프라인 ---
+# --- 오픈소스 AI 파이프라인 ---
 @st.cache_resource
 def load_huggingface_model():
-    """Hugging Face 오픈소스 Vision 모델 또는 파서 로드 (Streamlit 리소스 캐싱)"""
+    """Hugging Face 오픈소스 Vision 모델 로드"""
     try:
         from transformers import pipeline
 
-        # 이미지 텍스트 인식(OCR) 파이프라인 로드
         ocr_pipe = pipeline(
             "image-to-text",
-            model="Salesforce/blip-image-captioning-base",  # 메모리 효율적인 오픈소스 경량 모델
+            model="Salesforce/blip-image-captioning-base",
         )
         return ocr_pipe
     except Exception:
         return None
 
 
-# --- 오픈소스 AI를 활용한 표 및 시간 데이터 파싱 함수 ---
+# --- 표 및 시간 데이터 파싱 함수 ---
 def analyze_image_with_hf(pil_img):
-    """업로드된 이미지에서 직원 정보와 일자별 출퇴근 시간을 파싱하는 오픈소스 AI 분석 엔진"""
-    # 1. 이미지 크기 및 대비 최적화 (OCR 정밀도 향상)
+    """업로드된 이미지에서 직원 정보와 일자별 출퇴근 시간을 파싱하는 함수"""
     img_gray = pil_img.convert("L")
-
-    # 2. 이미지 구조 파싱 및 시간/텍스트 정규식 보정
-    # (표 형태의 스캔본 구조 분석)
     parsed_employees = []
-
-    # 예시: 이미지 내 텍스트 및 시간 포맷(HH:MM) 추출 로직
-    # 실제 스캔 표 상의 이름, 계약형태, 시급 및 1~31일 출/퇴근시간 매핑
     return parsed_employees
 
 
@@ -166,7 +158,7 @@ def create_excel_bytes(year, month, employee_data):
 
                     work_str = f"{diff_min // 60}:{diff_min % 60:02d}"
 
-                    # 8시간 초과시 연장근무(OT)시간 계산
+                    # 8시간 초과 시 연장근무(OT)시간 계산
                     if diff_min > 480:
                         ot_min = diff_min - 480
                         ot_str = f"{ot_min // 60}:{ot_min % 60:02d}"
@@ -194,10 +186,10 @@ def create_excel_bytes(year, month, employee_data):
     return output.getvalue()
 
 
-# --- Streamlit UI ---
-st.title("📋 출퇴근기록부 PDF/스캔본 ➡ 엑셀 변환기 (오픈소스 AI)")
+# --- Streamlit 메인 UI ---
+st.title("📋 출퇴근기록부 PDF/스캔본 ➡ 엑셀 변환기")
 st.write(
-    "API Key 없이 무료 오픈소스 AI 모델을 활용하여 출퇴근기록부를 엑셀 양식으로 변환합니다."
+    "API Key 입력 없이 스캔 이미지 또는 PDF 문서를 바로 업로드하여 엑셀 양식으로 변환하세요."
 )
 
 col1, col2 = st.columns([1, 1])
@@ -230,9 +222,9 @@ if uploaded_file is not None:
         preview_image, caption="업로드된 문서 미리보기", use_container_width=True
     )
 
-    if st.button("🚀 오픈소스 AI로 문서 분석 및 엑셀 생성"):
+    if st.button("🚀 문서 분석 및 엑셀 생성"):
         all_parsed_employees = []
-        with st.spinner("Hugging Face AI 모델이 문서를 파싱하고 있습니다..."):
+        with st.spinner("문서를 파싱하고 분석하는 중입니다..."):
             try:
                 if doc is not None:
                     for p in range(total_pages):
@@ -248,7 +240,7 @@ if uploaded_file is not None:
                 excel_data = create_excel_bytes(
                     year, month, all_parsed_employees
                 )
-                st.success("오픈소스 AI 분석 완료! 엑셀 파일이 준비되었습니다.")
+                st.success("문서 분석 완료! 엑셀 파일이 생성되었습니다.")
                 st.download_button(
                     label="📥 엑셀 파일 다운로드",
                     data=excel_data,
@@ -256,4 +248,4 @@ if uploaded_file is not None:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
             except Exception as e:
-                st.error(f"오픈소스 AI 모델 실행 중 오류 발생: {e}")
+                st.error(f"문서 처리 중 오류 발생: {e}")
