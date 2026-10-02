@@ -1,37 +1,51 @@
 import calendar
 from datetime import datetime
+import io
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+import streamlit as st
+
+st.set_page_config(
+    page_title="출퇴근기록부 엑셀 서식 자동 변환기",
+    page_icon="📊",
+    layout="wide",
+)
+
+st.title("📊 출퇴근기록부 엑셀 서식 자동 변환기")
+st.write(
+    "Gemini에서 추출한 원본 엑셀 파일을 업로드하시면 예쁜 서식과 근무/OT시간이 자동 계산된 엑셀로 변환해 드립니다."
+)
 
 
-def transform_attendance_excel(input_file, output_file):
-    # 1. 원본 데이터 읽기
-    wb_in = openpyxl.load_workbook(input_file)
+def process_excel(file_bytes, year, month):
+    # 1. 업로드된 파일 바이트 읽기
+    wb_in = openpyxl.load_workbook(io.BytesIO(file_bytes))
     ws_in = wb_in.active
 
-    # 직원별 일자별 출/퇴근 기록 정리
-    # data_map[emp_name][day] = {'in': '08:30', 'out': '12:30'}
+    # 직원별 일자별 출/퇴근 데이터 추출
     data_map = {}
     for row in ws_in.iter_rows(min_row=4, values_only=True):
         if not row[0] or not row[2]:
             continue
         date_val, day_name, emp_name, in_time, out_time = row[:5]
 
-        # 날짜 파싱 (datetime 객체 또는 문자열)
         if isinstance(date_val, datetime):
             day_num = date_val.day
         else:
-            day_num = int(str(date_val).split("-")[-1])
+            try:
+                day_num = int(str(date_val).split("-")[-1])
+            except ValueError:
+                continue
 
         emp_name = str(emp_name).strip()
-        in_str = str(in_time).strip() if in_time else ""
-        out_str = str(out_time).strip() if out_time else ""
+        in_str = str(in_time).strip() if in_time and str(in_time) != "None" else ""
+        out_str = str(out_time).strip() if out_time and str(out_time) != "None" else ""
 
         if emp_name not in data_map:
             data_map[emp_name] = {}
         data_map[emp_name][day_num] = {"in": in_str, "out": out_str}
 
-    # 직원 기본정보 매핑 (계약형태, 시급)
+    # 직원 계약 및 시급 정보
     emp_info_dict = {
         "천근하": ("정규", 10320),
         "김란님": ("정규", 11279),
@@ -47,9 +61,8 @@ def transform_attendance_excel(input_file, output_file):
     # 2. 새로운 양식 엑셀 워크북 생성
     wb_out = openpyxl.Workbook()
     ws_out = wb_out.active
-    ws_out.title = "2026년 9월"
+    ws_out.title = f"{year}년 {month}월"
 
-    # 스타일 정의
     font_bold = Font(name="맑은 고딕", size=9, bold=True)
     font_normal = Font(name="맑은 고딕", size=9)
     font_title = Font(name="맑은 고딕", size=14, bold=True)
@@ -67,15 +80,14 @@ def transform_attendance_excel(input_file, output_file):
     )
     fill_sat = PatternFill(
         start_color="DCE6F1", end_color="DCE6F1", fill_type="solid"
-    )  # 연한 파랑
+    )
     fill_sun = PatternFill(
         start_color="FCE4D6", end_color="FCE4D6", fill_type="solid"
-    )  # 연한 주황
+    )
 
-    year, month = 2026, 9
     _, last_day = calendar.monthrange(year, month)
 
-    # 3. 메인 제목 생성 (A1:AJ1)
+    # 상단 제목
     ws_out.merge_cells(
         start_row=1, start_column=1, end_row=1, end_column=4 + last_day
     )
@@ -85,7 +97,7 @@ def transform_attendance_excel(input_file, output_file):
     ws_out["A1"].font = font_title
     ws_out["A1"].alignment = align_center
 
-    # 4. 헤더 레이아웃 구성
+    # 헤더 작성
     headers_left = ["이름", "계약형태", "시급\n(급여/근무시간)", "출/퇴"]
     for i, h in enumerate(headers_left, 1):
         ws_out.merge_cells(start_row=2, start_column=i, end_row=3, end_column=i)
@@ -112,10 +124,9 @@ def transform_attendance_excel(input_file, output_file):
                 else (fill_sun if dt.weekday() == 6 else fill_header)
             )
 
-    # 5. 직원별 출퇴근 데이터 작성
+    # 본문 영역 작성 및 시간 자동 계산
     start_row = 4
     for emp_name, (contract_type, wage) in emp_info_dict.items():
-        # 왼쪽 프로필 열 병합 (4행씩)
         ws_out.merge_cells(
             start_row=start_row,
             start_column=1,
@@ -155,7 +166,6 @@ def transform_attendance_excel(input_file, output_file):
             in_t = day_data.get("in", "")
             out_t = day_data.get("out", "")
 
-            # 출/퇴근 시간 기입
             c_in = ws_out.cell(row=start_row, column=col_idx, value=in_t)
             c_out = ws_out.cell(row=start_row + 1, column=col_idx, value=out_t)
 
@@ -163,7 +173,6 @@ def transform_attendance_excel(input_file, output_file):
                 c.font = font_normal
                 c.alignment = align_center
 
-            # 근무시간 / OT시간 계산
             work_str, ot_str = "", ""
             if in_t and out_t and ":" in in_t and ":" in out_t:
                 try:
@@ -171,7 +180,7 @@ def transform_attendance_excel(input_file, output_file):
                     t2 = datetime.strptime(out_t, "%H:%M")
                     diff = (t2 - t1).seconds // 60
 
-                    # 8시간(480분) 이상 시 1시간(60분) 휴게시간 공제
+                    # 8시간 이상 시 휴게시간 1시간(60분) 차감
                     if diff >= 480:
                         diff -= 60
 
@@ -196,7 +205,7 @@ def transform_attendance_excel(input_file, output_file):
 
         start_row += 4
 
-    # 전체 격자 테두리 및 정렬 적용
+    # 격자 테두리 적용
     for row in ws_out.iter_rows(
         min_row=2, max_row=start_row - 1, min_col=1, max_col=4 + last_day
     ):
@@ -205,11 +214,31 @@ def transform_attendance_excel(input_file, output_file):
             if not cell.alignment.horizontal:
                 cell.alignment = align_center
 
-    wb_out.save(output_file)
-    print(f"변환 완료! 파일 저장 위치: {output_file}")
+    output = io.BytesIO()
+    wb_out.save(output)
+    return output.getvalue()
 
 
-# 실행
-transform_attendance_excel(
-    "2026년_9월_출퇴근기록.xlsx", "2026년_9월_출퇴근기록부_완성본.xlsx"
+# Streamlit UI
+uploaded_file = st.file_uploader(
+    "Gemini에서 추출한 엑셀 파일(.xlsx) 업로드", type=["xlsx"]
 )
+
+col1, col2 = st.columns([1, 1])
+with col1:
+    year = st.number_input("연도 선택", value=2026)
+    month = st.number_input("월 선택", value=9, min_value=1, max_value=12)
+
+if uploaded_file is not None:
+    if st.button("🚀 서식 자동 생성 및 계산 실행"):
+        try:
+            excel_bytes = process_excel(uploaded_file.read(), year, month)
+            st.success("🎉 서식 변환 및 근무/OT시간 자동 계산이 완료되었습니다!")
+            st.download_button(
+                label="📥 변환된 출퇴근기록부 다운로드",
+                data=excel_bytes,
+                file_name=f"{year}년_{month}월_출퇴근기록부_완성본.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        except Exception as e:
+            st.error(f"오류 발생: {e}")
