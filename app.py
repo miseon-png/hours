@@ -1,5 +1,5 @@
 import calendar
-from datetime import datetime
+from datetime import datetime, date
 import io
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -17,8 +17,20 @@ st.write(
 )
 
 
+# 오늘 기준 지난달(전월) 연도 및 월 자동 산출
+today = date.today()
+first_day_this_month = today.replace(day=1)
+last_month_date = first_day_this_month - calendar.timedelta(days=1) if hasattr(calendar, 'timedelta') else (first_day_this_month - date.resolution).replace(day=1) - date.resolution
+# 정확한 전월 연/월 계산
+if today.month == 1:
+    default_year = today.year - 1
+    default_month = 12
+else:
+    default_year = today.year
+    default_month = today.month - 1
+
+
 def process_excel(file_bytes, year, month):
-    # 1. 업로드된 엑셀 파일 로드
     wb_in = openpyxl.load_workbook(io.BytesIO(file_bytes))
     ws_in = wb_in.active
 
@@ -231,8 +243,8 @@ uploaded_file = st.file_uploader(
 
 col1, col2 = st.columns([1, 1])
 with col1:
-    year = st.number_input("연도 선택", value=2026)
-    month = st.number_input("월 선택", value=9, min_value=1, max_value=12)
+    year = st.number_input("연도 선택", value=default_year)
+    month = st.number_input("월 선택", value=default_month, min_value=1, max_value=12)
 
 if uploaded_file is not None:
     if st.button("🚀 서식 자동 생성 및 계산 실행"):
