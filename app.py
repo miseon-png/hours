@@ -1,131 +1,61 @@
 import calendar
 from datetime import datetime
-import io
-import re
-import easyocr
-import fitz  # PyMuPDF
-import numpy as np
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from PIL import Image
-import streamlit as st
-
-# 페이지 기본 설정
-st.set_page_config(
-    page_title="출퇴근기록부 PDF/스캔본 ➡ 엑셀 변환기 (오픈소스 OCR)",
-    page_icon="🖥️",
-    layout="wide",
-)
 
 
-# --- EasyOCR 모델 캐싱 (앱 실행 시 1회만 로드) ---
-@st.cache_resource
-def load_easyocr_reader():
-    # 한국어(ko) 및 영어/숫자(en) 엔진 로드
-    return easyocr.Reader(["ko", "en"], gpu=False)
+def transform_attendance_excel(input_file, output_file):
+    # 1. 원본 데이터 읽기
+    wb_in = openpyxl.load_workbook(input_file)
+    ws_in = wb_in.active
 
+    # 직원별 일자별 출/퇴근 기록 정리
+    # data_map[emp_name][day] = {'in': '08:30', 'out': '12:30'}
+    data_map = {}
+    for row in ws_in.iter_rows(min_row=4, values_only=True):
+        if not row[0] or not row[2]:
+            continue
+        date_val, day_name, emp_name, in_time, out_time = row[:5]
 
-reader = load_easyocr_reader()
+        # 날짜 파싱 (datetime 객체 또는 문자열)
+        if isinstance(date_val, datetime):
+            day_num = date_val.day
+        else:
+            day_num = int(str(date_val).split("-")[-1])
 
+        emp_name = str(emp_name).strip()
+        in_str = str(in_time).strip() if in_time else ""
+        out_str = str(out_time).strip() if out_time else ""
 
-# --- 오픈소스 OCR 텍스트 추출 및 표 구조 분석 ---
-def analyze_image_with_easyocr(pil_img):
-    # PIL 이미지를 numpy 배열로 변환
-    img_np = np.array(pil_img)
+        if emp_name not in data_map:
+            data_map[emp_name] = {}
+        data_map[emp_name][day_num] = {"in": in_str, "out": out_str}
 
-    # EasyOCR 실행 (텍스트, Bounding Box, Confidence)
-    results = reader.readtext(img_np)
+    # 직원 기본정보 매핑 (계약형태, 시급)
+    emp_info_dict = {
+        "천근하": ("정규", 10320),
+        "김란님": ("정규", 11279),
+        "김완수": ("정규", 11962),
+        "심동희": ("계약\n월급계약", 10320),
+        "하영실": ("계약\n시급계약", 10320),
+        "민순기": ("계약\n시급계약", 10320),
+        "도용엔 프엄안": ("계약\n시급계약", 10320),
+        "VAN DUNG": ("계약\n월급계약", 10320),
+        "VAN HA": ("정규", 10320),
+    }
 
-    # 추출된 텍스트 목록 (좌표 Y축 기준 순서 정렬)
-    # results format: [([[x1,y1],...], 'text', confidence), ...]
-    extracted_texts = [res[1].strip() for res in results if res[1].strip()]
+    # 2. 새로운 양식 엑셀 워크북 생성
+    wb_out = openpyxl.Workbook()
+    ws_out = wb_out.active
+    ws_out.title = "2026년 9월"
 
-    # 시간 형태(HH:MM 또는 H:MM) 정규식 패턴
-    time_pattern = re.compile(r"^([01]?\d|2[03]):([0-5]\d)$")
-    digits_pattern = re.compile(r"\d+")
-
-    all_times = []
-    names = []
-    wages = []
-    contract_types = []
-
-    for text in extracted_texts:
-        clean_text = text.replace(" ", "")
-        # 시간 형식 추출 (08:30 등)
-        if time_pattern.match(clean_text):
-            all_times.append(clean_text)
-        # 시급/금액 숫자가 있을 경우
-        elif "원" in text or (clean_text.isdigit() and len(clean_text) >= 4):
-            nums = digits_pattern.findall(clean_text)
-            if nums:
-                wages.append(int(nums[0]))
-        # 계약 형태 패턴
-        elif any(k in clean_text for k in ["정규", "계약", "시급", "월급"]):
-            contract_types.append(text)
-        # 한글 이름 패턴 (2~4글자 한글)
-        elif re.match(r"^[가-힣]{2,4}$", clean_text) and clean_text not in [
-            "출근",
-            "퇴근",
-            "근무",
-            "시간",
-            "이름",
-            "계약",
-            "생산",
-            "파트",
-            "지점",
-        ]:
-            names.append(clean_text)
-
-    # 기본 파싱 데이터 구성
-    parsed_employees = []
-
-    # 감지된 이름이 없으면 기본 이름 부여
-    if not names:
-        names = ["직원1"]
-
-    for idx, name in enumerate(names):
-        emp_wage = wages[idx] if idx < len(wages) else 10320
-        emp_contract = (
-            contract_types[idx] if idx < len(contract_types) else "정규"
-        )
-
-        records = {}
-        # 추출된 시간들을 1일부터 순서대로 출/퇴근 조립
-        time_idx = 0
-        for day in range(1, 32):
-            in_t = ""
-            out_t = ""
-
-            if time_idx < len(all_times):
-                in_t = all_times[time_idx]
-                time_idx += 1
-            if time_idx < len(all_times):
-                out_t = all_times[time_idx]
-                time_idx += 1
-
-            records[str(day)] = {"in": in_t, "out": out_t}
-
-        parsed_employees.append(
-            {
-                "name": name,
-                "contract_type": emp_contract,
-                "wage": emp_wage,
-                "records": records,
-            }
-        )
-
-    return parsed_employees
-
-
-# --- 엑셀 작성 및 자동 시간/OT 계산 함수 ---
-def create_excel_bytes(year, month, employee_data):
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = f"{year}년 {month}월"
-
-    font_bold = Font(name="맑은 고딕", size=10, bold=True)
+    # 스타일 정의
+    font_bold = Font(name="맑은 고딕", size=9, bold=True)
+    font_normal = Font(name="맑은 고딕", size=9)
     font_title = Font(name="맑은 고딕", size=14, bold=True)
-    align_center = Alignment(horizontal="center", vertical="center")
+    align_center = Alignment(
+        horizontal="center", vertical="center", wrap_text=True
+    )
 
     border_thin = Side(border_style="thin", color="000000")
     box_border = Border(
@@ -137,36 +67,41 @@ def create_excel_bytes(year, month, employee_data):
     )
     fill_sat = PatternFill(
         start_color="DCE6F1", end_color="DCE6F1", fill_type="solid"
-    )
+    )  # 연한 파랑
     fill_sun = PatternFill(
         start_color="FCE4D6", end_color="FCE4D6", fill_type="solid"
+    )  # 연한 주황
+
+    year, month = 2026, 9
+    _, last_day = calendar.monthrange(year, month)
+
+    # 3. 메인 제목 생성 (A1:AJ1)
+    ws_out.merge_cells(
+        start_row=1, start_column=1, end_row=1, end_column=4 + last_day
     )
+    ws_out["A1"] = (
+        f"팜360닷에이아이 익산지점 생산파트 {year}년 {month}월 출퇴근기록부"
+    )
+    ws_out["A1"].font = font_title
+    ws_out["A1"].alignment = align_center
 
-    # 1. 제목 생성
-    ws.merge_cells("A1:AJ1")
-    ws["A1"] = f"팜360닷에이아이 익산지점 생산파트 {year}년 {month}월 출퇴근기록부"
-    ws["A1"].font = font_title
-    ws["A1"].alignment = align_center
-
-    # 2. 헤더 구성
+    # 4. 헤더 레이아웃 구성
     headers_left = ["이름", "계약형태", "시급\n(급여/근무시간)", "출/퇴"]
     for i, h in enumerate(headers_left, 1):
-        ws.merge_cells(start_row=2, start_column=i, end_row=3, end_column=i)
-        cell = ws.cell(row=2, column=i, value=h)
+        ws_out.merge_cells(start_row=2, start_column=i, end_row=3, end_column=i)
+        cell = ws_out.cell(row=2, column=i, value=h)
         cell.font = font_bold
         cell.alignment = align_center
         cell.fill = fill_header
 
-    _, last_day = calendar.monthrange(year, month)
     days_kr = ["월", "화", "수", "목", "금", "토", "일"]
-
     for d in range(1, last_day + 1):
         col_idx = 4 + d
         dt = datetime(year, month, d)
         day_name = days_kr[dt.weekday()]
 
-        c_day = ws.cell(row=2, column=col_idx, value=day_name)
-        c_date = ws.cell(row=3, column=col_idx, value=d)
+        c_day = ws_out.cell(row=2, column=col_idx, value=day_name)
+        c_date = ws_out.cell(row=3, column=col_idx, value=d)
 
         for c in [c_day, c_date]:
             c.font = font_bold
@@ -177,77 +112,92 @@ def create_excel_bytes(year, month, employee_data):
                 else (fill_sun if dt.weekday() == 6 else fill_header)
             )
 
-    # 3. 데이터 작성 및 근무/OT시간 자동 산출
+    # 5. 직원별 출퇴근 데이터 작성
     start_row = 4
-    for emp in employee_data:
-        ws.merge_cells(
+    for emp_name, (contract_type, wage) in emp_info_dict.items():
+        # 왼쪽 프로필 열 병합 (4행씩)
+        ws_out.merge_cells(
             start_row=start_row,
             start_column=1,
             end_row=start_row + 3,
             end_column=1,
         )
-        ws.merge_cells(
+        ws_out.merge_cells(
             start_row=start_row,
             start_column=2,
             end_row=start_row + 3,
             end_column=2,
         )
-        ws.merge_cells(
+        ws_out.merge_cells(
             start_row=start_row,
             start_column=3,
             end_row=start_row + 3,
             end_column=3,
         )
 
-        ws.cell(row=start_row, column=1, value=emp.get("name", ""))
-        ws.cell(row=start_row, column=2, value=emp.get("contract_type", ""))
-        ws.cell(row=start_row, column=3, value=emp.get("wage", ""))
+        ws_out.cell(row=start_row, column=1, value=emp_name).font = font_bold
+        ws_out.cell(row=start_row, column=2, value=contract_type).font = (
+            font_normal
+        )
+        ws_out.cell(row=start_row, column=3, value=f"{wage:,}").font = font_normal
 
         type_labels = ["출근", "퇴근", "근무시간", "OT시간"]
         for idx, label in enumerate(type_labels):
-            ws.cell(row=start_row + idx, column=4, value=label)
+            c = ws_out.cell(row=start_row + idx, column=4, value=label)
+            c.font = font_bold
+            c.alignment = align_center
 
-        records_data = emp.get("records", {})
+        emp_records = data_map.get(emp_name, {})
 
         for d in range(1, last_day + 1):
             col_idx = 4 + d
-            day_record = records_data.get(d) or records_data.get(str(d)) or {}
+            day_data = emp_records.get(d, {})
+            in_t = day_data.get("in", "")
+            out_t = day_data.get("out", "")
 
-            in_time_str = day_record.get("in", "")
-            out_time_str = day_record.get("out", "")
+            # 출/퇴근 시간 기입
+            c_in = ws_out.cell(row=start_row, column=col_idx, value=in_t)
+            c_out = ws_out.cell(row=start_row + 1, column=col_idx, value=out_t)
 
-            ws.cell(row=start_row, column=col_idx, value=in_time_str)
-            ws.cell(row=start_row + 1, column=col_idx, value=out_time_str)
+            for c in [c_in, c_out]:
+                c.font = font_normal
+                c.alignment = align_center
 
+            # 근무시간 / OT시간 계산
             work_str, ot_str = "", ""
-            if in_time_str and out_time_str:
+            if in_t and out_t and ":" in in_t and ":" in out_t:
                 try:
-                    t_in = datetime.strptime(in_time_str, "%H:%M")
-                    t_out = datetime.strptime(out_time_str, "%H:%M")
-                    diff_min = (t_out - t_in).seconds // 60
+                    t1 = datetime.strptime(in_t, "%H:%M")
+                    t2 = datetime.strptime(out_t, "%H:%M")
+                    diff = (t2 - t1).seconds // 60
 
-                    # 8시간(480분) 이상 근무 시 1시간(60분) 휴게시간 차감
-                    if diff_min >= 480:
-                        diff_min -= 60
+                    # 8시간(480분) 이상 시 1시간(60분) 휴게시간 공제
+                    if diff >= 480:
+                        diff -= 60
 
-                    work_str = f"{diff_min // 60}:{diff_min % 60:02d}"
+                    work_str = f"{diff // 60}:{diff % 60:02d}"
 
-                    # 8시간 초과시 연장근무시간(OT) 산출
-                    if diff_min > 480:
-                        ot_min = diff_min - 480
-                        ot_str = f"{ot_min // 60}:{ot_min % 60:02d}"
+                    if diff > 480:
+                        ot_m = diff - 480
+                        ot_str = f"{ot_m // 60}:{ot_m % 60:02d}"
                     else:
                         ot_str = "0:00"
-                except ValueError:
+                except Exception:
                     pass
 
-            ws.cell(row=start_row + 2, column=col_idx, value=work_str)
-            ws.cell(row=start_row + 3, column=col_idx, value=ot_str)
+            c_work = ws_out.cell(
+                row=start_row + 2, column=col_idx, value=work_str
+            )
+            c_ot = ws_out.cell(row=start_row + 3, column=col_idx, value=ot_str)
+
+            for c in [c_work, c_ot]:
+                c.font = font_normal
+                c.alignment = align_center
 
         start_row += 4
 
-    # 격자 테두리 적용
-    for row in ws.iter_rows(
+    # 전체 격자 테두리 및 정렬 적용
+    for row in ws_out.iter_rows(
         min_row=2, max_row=start_row - 1, min_col=1, max_col=4 + last_day
     ):
         for cell in row:
@@ -255,74 +205,11 @@ def create_excel_bytes(year, month, employee_data):
             if not cell.alignment.horizontal:
                 cell.alignment = align_center
 
-    output = io.BytesIO()
-    wb.save(output)
-    return output.getvalue()
+    wb_out.save(output_file)
+    print(f"변환 완료! 파일 저장 위치: {output_file}")
 
 
-# --- Streamlit UI ---
-st.title("🖥️ 출퇴근기록부 PDF/스캔본 ➡ 엑셀 변환기 (오픈소스 Engine)")
-
-st.info("💡 외부 API 키 없이 내 서버에서 직접 텍스트를 인식하여 변환합니다.")
-
-col1, col2 = st.columns([1, 1])
-with col1:
-    year = st.number_input("연도 선택", min_value=2020, max_value=2030, value=2026)
-    month = st.selectbox("월 선택", list(range(1, 13)), index=7)
-
-uploaded_file = st.file_uploader(
-    "출퇴근기록부 PDF 또는 스캔 이미지 업로드",
-    type=["pdf", "png", "jpg", "jpeg"],
+# 실행
+transform_attendance_excel(
+    "2026년_9월_출퇴근기록.xlsx", "2026년_9월_출퇴근기록부_완성본.xlsx"
 )
-
-if uploaded_file is not None:
-    doc = None
-    total_pages = 1
-
-    if uploaded_file.type == "application/pdf":
-        pdf_bytes = uploaded_file.read()
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        total_pages = len(doc)
-        st.info(f"📄 총 {total_pages}페이지의 PDF 문서입니다.")
-
-        page = doc.load_page(0)
-        pix = page.get_pixmap(dpi=150)
-        preview_image = Image.open(io.BytesIO(pix.tobytes("png")))
-    else:
-        preview_image = Image.open(uploaded_file)
-
-    st.image(
-        preview_image, caption="업로드된 문서 미리보기", use_container_width=True
-    )
-
-    if st.button("🚀 오픈소스 OCR 분석 및 엑셀 생성"):
-        all_parsed_employees = []
-        with st.spinner(
-            "EasyOCR 엔진이 문서를 정밀 파싱하는 중입니다 (API 키 불필요)..."
-        ):
-            try:
-                if doc is not None:
-                    for p in range(total_pages):
-                        page = doc.load_page(p)
-                        pix = page.get_pixmap(dpi=150)
-                        img = Image.open(io.BytesIO(pix.tobytes("png")))
-                        emp_list = analyze_image_with_easyocr(img)
-                        all_parsed_employees.extend(emp_list)
-                else:
-                    emp_list = analyze_image_with_easyocr(preview_image)
-                    all_parsed_employees.extend(emp_list)
-
-                excel_data = create_excel_bytes(
-                    year, month, all_parsed_employees
-                )
-                st.success(
-                    "🎉 API 제한 걱정 없이 성공적으로 파싱을 완료했습니다!"
-                )
-                st.download_button(
-                    label="📥 엑셀 파일 다운로드",
-                    data=excel_data,
-                    file_name=f"출퇴근기록부_{year}년_{month}월.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
-            except Exception as e:
-                st.error(f"분석 실패 원인: {e}")
