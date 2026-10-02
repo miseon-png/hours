@@ -1,10 +1,10 @@
 import calendar
 from datetime import datetime
 import io
-import re
-import easyocr
+import json
 import fitz  # PyMuPDF
-import numpy as np
+from google import genai
+from google.genai import types
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from PIL import Image
@@ -17,128 +17,68 @@ st.set_page_config(
     layout="wide",
 )
 
-
-# --- EasyOCR 모델 캐싱 로드 (무료 오프라인 모델) ---
-@st.cache_resource
-def load_ocr_reader():
-    # GPU 없이 CPU 모드로 한글/영어 인식기 로드
-    return easyocr.Reader(["ko", "en"], gpu=False)
-
-
-# --- 실제 표 이미지 파싱 및 데이터 추출 로직 ---
-def analyze_image_and_extract_data(pil_img):
-    reader = load_ocr_reader()
-    img_np = np.array(pil_img)
-
-    # 1. EasyOCR 실행 (텍스트, 좌표, 신뢰도 추출)
-    results = reader.readtext(img_np)
-
-    if not results:
-        return []
-
-    # 2. 추출된 결과를 Y좌표 기준(행)으로 정렬
-    # result 구조: [ ( [[x1,y1], [x2,y2], [x3,y3], [x4,y4]], "텍스트", confidence ), ... ]
-    ocr_items = []
-    for bbox, text, prob in results:
-        text_clean = text.strip()
-        if not text_clean:
-            continue
-        # BBox의 중앙 Y좌표 및 X좌표 계산
-        top_left, bottom_right = bbox[0], bbox[2]
-        center_x = (top_left[0] + bottom_right[0]) / 2
-        center_y = (top_left[1] + bottom_right[1]) / 2
-        ocr_items.append(
-            {
-                "text": text_clean,
-                "x": center_x,
-                "y": center_y,
-                "box": bbox,
-            }
-        )
-
-    # Y좌표 순 정렬
-    ocr_items.sort(key=lambda item: item["y"])
-
-    # 3. 시간 포맷(HH:MM 또는 H:MM) 정규식
-    time_re = re.compile(r"(\d{1,2})[:;.]?(\d{2})")
-
-    # 인식된 전체 텍스트 중 시간 및 이름 관련 블록 묶기
-    employees = []
-    current_emp = None
-
-    # 이름 및 계약형태 후보 찾기
-    known_contracts = ["정규", "계약", "월급계약", "시급계약", "파트"]
-
-    for item in ocr_items:
-        txt = item["text"]
-
-        # 직원 이름/계약 형태 감지 (시간 형식이 아니고 길이가 짧은 한글)
-        is_time = time_re.search(txt)
-        if not is_time and len(txt) <= 6 and re.search(r"[가-힣]", txt):
-            if any(c in txt for c in known_contracts) or len(txt) >= 2:
-                # 새로운 직원 라인 시작 가능성 체크
-                if current_emp is None or (
-                    current_emp and len(current_emp["records"]) > 0
-                ):
-                    if current_emp:
-                        employees.append(current_emp)
-                    current_emp = {
-                        "name": txt,
-                        "contract_type": "정규",
-                        "wage": 10320,
-                        "records": {},
-                    }
-                    continue
-
-        # 시간 패턴 발견 시 처리
-        if is_time and current_emp:
-            m = time_re.search(txt)
-            h, mins = m.group(1), m.group(2)
-            if len(h) == 1:
-                h = "0" + h
-            formatted_time = f"{h}:{mins}"
-
-            # X 좌표를 기반으로 1일~31일 위치 추정 (이미지 폭 기준 31등분)
-            img_width = pil_img.width
-            # 왼쪽 정보영역(약 15%)을 제외한 영역을 31일로 분할
-            margin_left = img_width * 0.12
-            day_width = (img_width - margin_left) / 31.0
-
-            if item["x"] > margin_left:
-                day_idx = int((item["x"] - margin_left) // day_width) + 1
-                day_idx = max(1, min(31, day_idx))
-
-                if day_idx not in current_emp["records"]:
-                    current_emp["records"][day_idx] = {
-                        "in": formatted_time,
-                        "out": "",
-                    }
-                elif not current_emp["records"][day_idx]["out"]:
-                    current_emp["records"][day_idx]["out"] = formatted_time
-
-    if current_emp:
-        employees.append(current_emp)
-
-    # 데이터가 없을 경우 기본 안전 구조 반환
-    if not employees:
-        employees = [
-            {
-                "name": "인식필요(직원1)",
-                "contract_type": "정규",
-                "wage": 10320,
-                "records": {},
-            }
-        ]
-
-    return employees
+# Streamlit Secrets 또는 코드 내 정의된 API Key 로드
+GEMINI_API_KEY = st.secrets.get(
+    "GEMINI_API_KEY",
+    "AQ.Ab8RN6JtWgAd1P_oAikhVoxK0pwySrPvcF0ojsyk6L5_MWtWnA",
+)
 
 
-# --- 엑셀 파일 생성 및 양식 구성 ---
+# --- Gemini Vision API를 이용한 문서 분석 파이프라인 ---
+def analyze_image_with_gemini(pil_img, api_key):
+    client = genai.Client(api_key=api_key)
+
+    prompt = """
+    이 이미지는 출퇴근기록부 표 문서입니다.
+    이미지에서 각 직원별로 아래 정보를 정밀하게 인식하여 정규 JSON 배열 형식으로만 응답하세요.
+
+    [추출 항목]
+    1. name: 직원 이름
+    2. contract_type: 계약형태 (예: 정규, 계약 월급계약, 계약 시급계약 등)
+    3. wage: 시급 (숫자만 추출)
+    4. records: 1일부터 31일까지의 일자별 출근시간(in)과 퇴근시간(out)
+       - 시간 포맷: "HH:MM" (예: 08:30, 12:30, 17:30 등)
+       - 연차, 반차, 결근, 근무기록이 없는 날은 출퇴근시간을 빈 문자열("")로 처리하세요.
+
+    [응답 JSON 포맷 구조 예시]
+    [
+      {
+        "name": "천근하",
+        "contract_type": "정규",
+        "wage": 10320,
+        "records": {
+          "1": {"in": "", "out": ""},
+          "2": {"in": "08:30", "out": "12:30"},
+          "3": {"in": "08:30", "out": "12:30"}
+        }
+      }
+    ]
+    """
+
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=[pil_img, prompt],
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            temperature=0.1,  # 정밀도 조절
+        ),
+    )
+
+    data = json.loads(response.text)
+    if isinstance(data, dict):
+        for k in data:
+            if isinstance(data[k], list):
+                return data[k]
+    return data
+
+
+# --- 엑셀 작성 및 자동 시간/OT 계산 함수 ---
 def create_excel_bytes(year, month, employee_data):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = f"{year}년 {month}월"
 
+    # 스타일 설정
     font_bold = Font(name="맑은 고딕", size=10, bold=True)
     font_title = Font(name="맑은 고딕", size=14, bold=True)
     align_center = Alignment(horizontal="center", vertical="center")
@@ -158,13 +98,13 @@ def create_excel_bytes(year, month, employee_data):
         start_color="FCE4D6", end_color="FCE4D6", fill_type="solid"
     )
 
-    # 1. 제목
+    # 1. 제목 생성
     ws.merge_cells("A1:AJ1")
     ws["A1"] = f"팜360닷에이아이 익산지점 생산파트 {year}년 {month}월 출퇴근기록부"
     ws["A1"].font = font_title
     ws["A1"].alignment = align_center
 
-    # 2. 헤더
+    # 2. 헤더 구성
     headers_left = ["이름", "계약형태", "시급\n(급여/근무시간)", "출/퇴"]
     for i, h in enumerate(headers_left, 1):
         ws.merge_cells(start_row=2, start_column=i, end_row=3, end_column=i)
@@ -193,7 +133,7 @@ def create_excel_bytes(year, month, employee_data):
                 else (fill_sun if dt.weekday() == 6 else fill_header)
             )
 
-    # 3. 데이터 및 시간/OT 계산
+    # 3. 데이터 작성 및 근무/OT시간 자동 산출
     start_row = 4
     for emp in employee_data:
         ws.merge_cells(
@@ -242,12 +182,13 @@ def create_excel_bytes(year, month, employee_data):
                     t_out = datetime.strptime(out_time_str, "%H:%M")
                     diff_min = (t_out - t_in).seconds // 60
 
-                    # 8시간 이상 근무 시 1시간 휴게시간 자동 차감
+                    # 8시간(480분) 이상 근무 시 1시간(60분) 휴게시간 차감
                     if diff_min >= 480:
                         diff_min -= 60
 
                     work_str = f"{diff_min // 60}:{diff_min % 60:02d}"
 
+                    # 8시간 초과시 연장근무시간(OT) 산출
                     if diff_min > 480:
                         ot_min = diff_min - 480
                         ot_str = f"{ot_min // 60}:{ot_min % 60:02d}"
@@ -261,6 +202,7 @@ def create_excel_bytes(year, month, employee_data):
 
         start_row += 4
 
+    # 격자 테두리 적용
     for row in ws.iter_rows(
         min_row=2, max_row=start_row - 1, min_col=1, max_col=4 + last_day
     ):
@@ -274,9 +216,8 @@ def create_excel_bytes(year, month, employee_data):
     return output.getvalue()
 
 
-# --- UI ---
+# --- Streamlit UI ---
 st.title("📋 출퇴근기록부 PDF/스캔본 ➡ 엑셀 변환기")
-st.write("문서를 업로드하면 OCR 엔진이 시간 및 직원 데이터를 파싱하여 엑셀을 추출합니다.")
 
 col1, col2 = st.columns([1, 1])
 with col1:
@@ -308,30 +249,39 @@ if uploaded_file is not None:
         preview_image, caption="업로드된 문서 미리보기", use_container_width=True
     )
 
-    if st.button("🚀 문서 OCR 읽기 및 엑셀 변환"):
-        all_parsed_employees = []
-        with st.spinner("OCR 엔진이 표와 시간 데이터 글자를 분석 중입니다..."):
-            try:
-                if doc is not None:
-                    for p in range(total_pages):
-                        page = doc.load_page(p)
-                        pix = page.get_pixmap(dpi=200)
-                        img = Image.open(io.BytesIO(pix.tobytes("png")))
-                        emp_list = analyze_image_and_extract_data(img)
+    if st.button("🚀 문서 AI 분석 및 엑셀 생성"):
+        if not GEMINI_API_KEY:
+            st.error(
+                "Gemini API Key가 설정되지 않았습니다. Secrets 구성을 확인해주세요."
+            )
+        else:
+            all_parsed_employees = []
+            with st.spinner("Gemini AI가 문서를 정밀하게 분석하는 중입니다..."):
+                try:
+                    if doc is not None:
+                        for p in range(total_pages):
+                            page = doc.load_page(p)
+                            pix = page.get_pixmap(dpi=150)
+                            img = Image.open(io.BytesIO(pix.tobytes("png")))
+                            emp_list = analyze_image_with_gemini(
+                                img, GEMINI_API_KEY
+                            )
+                            all_parsed_employees.extend(emp_list)
+                    else:
+                        emp_list = analyze_image_with_gemini(
+                            preview_image, GEMINI_API_KEY
+                        )
                         all_parsed_employees.extend(emp_list)
-                else:
-                    emp_list = analyze_image_and_extract_data(preview_image)
-                    all_parsed_employees.extend(emp_list)
 
-                excel_data = create_excel_bytes(
-                    year, month, all_parsed_employees
-                )
-                st.success("문서 읽기 완료! 엑셀 다운로드 버튼이 아래에 준비되었습니다.")
-                st.download_button(
-                    label="📥 엑셀 파일 다운로드",
-                    data=excel_data,
-                    file_name=f"출퇴근기록부_{year}년_{month}월.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
-            except Exception as e:
-                st.error(f"문서 데이터 파싱 중 에러 발생: {e}")
+                    excel_data = create_excel_bytes(
+                        year, month, all_parsed_employees
+                    )
+                    st.success("AI 문서 파싱 완료! 엑셀 다운로드 버튼이 준비되었습니다.")
+                    st.download_button(
+                        label="📥 엑셀 파일 다운로드",
+                        data=excel_data,
+                        file_name=f"출퇴근기록부_{year}년_{month}월.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+                except Exception as e:
+                    st.error(f"분석 중 오류 발생: {e}")
