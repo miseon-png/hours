@@ -1,10 +1,10 @@
+import calendar
 from datetime import datetime
 import io
-import calendar
-from PIL import Image
+import fitz  # PyMuPDF
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-import pypdfium2 as pdfium
+from PIL import Image
 import streamlit as st
 
 # 페이지 기본 설정
@@ -47,7 +47,7 @@ def create_excel_bytes(year, month, employee_data):
     ws["A1"].font = font_title
     ws["A1"].alignment = align_center
 
-    # 2. 헤더 (이름, 계약형태, 시급, 출/퇴)
+    # 2. 헤더
     headers_left = ["이름", "계약형태", "시급\n(급여/근무시간)", "출/퇴"]
     for i, h in enumerate(headers_left, 1):
         ws.merge_cells(start_row=2, start_column=i, end_row=3, end_column=i)
@@ -59,7 +59,6 @@ def create_excel_bytes(year, month, employee_data):
     _, last_day = calendar.monthrange(year, month)
     days_kr = ["월", "화", "수", "목", "금", "토", "일"]
 
-    # 날짜 및 요일 입력
     for d in range(1, last_day + 1):
         col_idx = 4 + d
         dt = datetime(year, month, d)
@@ -77,7 +76,7 @@ def create_excel_bytes(year, month, employee_data):
                 else (fill_sun if dt.weekday() == 6 else fill_header)
             )
 
-    # 3. 데이터 작성 및 근무/OT시간 자동 계산
+    # 3. 데이터 작성 및 시간/OT 자동 계산
     start_row = 4
     for emp in employee_data:
         ws.merge_cells(
@@ -124,13 +123,11 @@ def create_excel_bytes(year, month, employee_data):
                     t_out = datetime.strptime(out_time_str, "%H:%M")
                     diff_min = (t_out - t_in).seconds // 60
 
-                    # 8시간(480분) 이상 근무 시 점심/휴게시간 1시간(60분) 자동 차감 예시
                     if diff_min >= 480:
-                        diff_min -= 60
+                        diff_min -= 60  # 휴게시간 차감
 
                     work_str = f"{diff_min // 60}:{diff_min % 60:02d}"
 
-                    # 8시간 초과 근무 시 OT 계산
                     if diff_min > 480:
                         ot_min = diff_min - 480
                         ot_str = f"{ot_min // 60}:{ot_min % 60:02d}"
@@ -144,7 +141,7 @@ def create_excel_bytes(year, month, employee_data):
 
         start_row += 4
 
-    # 격자 테두리 적용
+    # 테두리 적용
     for row in ws.iter_rows(
         min_row=2, max_row=start_row - 1, min_col=1, max_col=4 + last_day
     ):
@@ -178,30 +175,29 @@ uploaded_file = st.file_uploader(
 if uploaded_file is not None:
     preview_image = None
 
-    # PDF 인 경우 pypdfium2 라이브러리로 첫 페이지 이미지 변환
+    # PDF인 경우 PyMuPDF(fitz) 라이브러리를 통해 안정적으로 변환
     if uploaded_file.type == "application/pdf":
         try:
             pdf_bytes = uploaded_file.read()
-            pdf = pdfium.PdfDocument(pdf_bytes)
-            page = pdf[0]  # 첫 번째 페이지
-            image_bitmap = page.render(scale=2)  # 선명도 조절
-            preview_image = image_bitmap.to_pil()
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            page = doc.load_page(0)  # 첫 페이지
+            pix = page.get_pixmap(dpi=150)  # 이미지 변환
+            preview_image = Image.open(io.BytesIO(pix.tobytes("png")))
         except Exception as e:
             st.error(f"PDF를 이미지로 변환하는 중 오류가 발생했습니다: {e}")
     else:
         preview_image = Image.open(uploaded_file)
 
-    if preview_image:
+    if preview_image is not None:
+        # 최신 Streamlit 버전 호환을 위해 use_container_width 적용
         st.image(
             preview_image,
             caption="업로드된 문서 미리보기",
-            use_column_width=True,
+            use_container_width=True,
         )
 
         if st.button("🚀 엑셀 파일 생성하기"):
             with st.spinner("문서 인식 및 시간/OT 자동 계산 중..."):
-                # TODO: OCR API(예: Naver CLOVA OCR 또는 Google Cloud Vision) 연동 시
-                # preview_image 변수를 OCR 모델에 전달하여 파싱 데이터를 가져옵니다.
                 sample_parsed_data = [
                     {
                         "name": "천근하",
