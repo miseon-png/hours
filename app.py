@@ -2,12 +2,15 @@ from datetime import datetime
 import io
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from pdf2image import convert_from_bytes
 from PIL import Image
 import streamlit as st
 
 # 페이지 기본 설정
 st.set_page_config(
-    page_title="출퇴근기록부 엑셀 변환기", page_icon="📊", layout="wide"
+    page_title="출퇴근기록부 PDF/이미지 ➡ 엑셀 변환기",
+    page_icon="📊",
+    layout="wide",
 )
 
 
@@ -147,64 +150,84 @@ def create_excel_bytes(year, month, employee_data):
             if not cell.alignment.horizontal:
                 cell.alignment = align_center
 
-    # 메모리 버퍼로 저장
     output = io.BytesIO()
     wb.save(output)
     return output.getvalue()
 
 
 # --- Streamlit UI 구성 ---
-st.title("📋 출퇴근기록부 스캔본 ➡️️ 엑셀 변환기")
+st.title("📋 출퇴근기록부 PDF/스캔본 ➡ 엑셀 변환기")
 st.write(
-    "스캔한 출퇴근기록부 이미지를 업로드하면 근무시간과 OT시간을 자동 계산하여 동일한 양식의 엑셀 파일로 생성합니다."
+    "PDF 또는 스캔 이미지 형태의 출퇴근기록부를 업로드하면 근무시간과 OT시간을 자동 계산하여 동일한 양식의 엑셀 파일로 변환합니다."
 )
 
 col1, col2 = st.columns([1, 1])
 
 with col1:
     year = st.number_input("연도 선택", min_value=2020, max_value=2030, value=2026)
-    month = st.selectbox("월 선택", list(range(1, 13)), index=7)  # 기본 8월
+    month = st.selectbox("월 선택", list(range(1, 13)), index=7)
 
+# PDF 및 이미지 파일 업로드 확장자 추가 (.pdf)
 uploaded_file = st.file_uploader(
-    "출퇴근기록부 스캔 이미지 업로드", type=["png", "jpg", "jpeg"]
+    "출퇴근기록부 PDF 또는 스캔 이미지 업로드",
+    type=["pdf", "png", "jpg", "jpeg"],
 )
 
 if uploaded_file is not None:
-    image = Image.open(uploaded_file)
-    st.image(image, caption="업로드된 스캔 이미지", use_column_width=True)
+    preview_image = None
 
-    if st.button("🚀 엑셀 파일 생성하기"):
-        with st.spinner("OCR 인식 및 시간/OT 자동 계산 중..."):
-            # TODO: 실제 OCR 연동 시 이곳에서 uploaded_file을 OCR API(CLOVA/Vision 등)에 전달하여 parsed_data를 만듭니다.
-            # 임시 샘플 데이터
-            sample_parsed_data = [
-                {
-                    "name": "천근하",
-                    "contract_type": "정규",
-                    "wage": 10320,
-                    "records": {
-                        3: {"in": "08:30", "out": "12:30"},
-                        4: {"in": "08:30", "out": "12:30"},
-                        11: {"in": "08:30", "out": "13:00"},
-                    },
-                },
-                {
-                    "name": "김란남",
-                    "contract_type": "정규",
-                    "wage": 11279,
-                    "records": {
-                        3: {"in": "08:30", "out": "12:30"},
-                        11: {"in": "12:30", "out": "17:30"},
-                    },
-                },
-            ]
-
-            excel_data = create_excel_bytes(year, month, sample_parsed_data)
-
-            st.success("엑셀 파일이 성공적으로 생성되었습니다!")
-            st.download_button(
-                label="📥 엑셀 파일 다운로드",
-                data=excel_data,
-                file_name=f"출퇴근기록부_{year}년_{month}월.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    # PDF인 경우 첫 페이지를 이미지로 변환
+    if uploaded_file.type == "application/pdf":
+        try:
+            pdf_bytes = uploaded_file.read()
+            images = convert_from_bytes(pdf_bytes, first_page=1, last_page=1)
+            if images:
+                preview_image = images[0]
+        except Exception as e:
+            st.error(
+                f"PDF를 이미지로 변환하는 중 오류가 발생했습니다. (poppler 설치 여부를 확인하세요): {e}"
             )
+    else:
+        preview_image = Image.open(uploaded_file)
+
+    if preview_image:
+        st.image(
+            preview_image,
+            caption="업로드된 문서 미리보기",
+            use_column_width=True,
+        )
+
+        if st.button("🚀 엑셀 파일 생성하기"):
+            with st.spinner("문서 인식 및 시간/OT 자동 계산 중..."):
+                # TODO: OCR API(Google Cloud Vision/Naver CLOVA 등)에 preview_image를 전달하여 추출
+                sample_parsed_data = [
+                    {
+                        "name": "천근하",
+                        "contract_type": "정규",
+                        "wage": 10320,
+                        "records": {
+                            3: {"in": "08:30", "out": "12:30"},
+                            4: {"in": "08:30", "out": "12:30"},
+                            11: {"in": "08:30", "out": "13:00"},
+                        },
+                    },
+                    {
+                        "name": "김란남",
+                        "contract_type": "정규",
+                        "wage": 11279,
+                        "records": {
+                            3: {"in": "08:30", "out": "12:30"},
+                            11: {"in": "12:30", "out": "17:30"},
+                        },
+                    },
+                ]
+
+                excel_data = create_excel_bytes(year, month, sample_parsed_data)
+
+                st.success("엑셀 파일이 성공적으로 생성되었습니다!")
+                st.download_button(
+                    label="📥 엑셀 파일 다운로드",
+                    data=excel_data,
+                    file_name=f"출퇴근기록부_{year}년_{month}월.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
