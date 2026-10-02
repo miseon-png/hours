@@ -1,63 +1,83 @@
 import calendar
 from datetime import datetime
 import io
-import re
-import easyocr
+import json
 import fitz  # PyMuPDF
-import numpy as np
+from google import genai
+from google.genai import types
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from PIL import Image
 import streamlit as st
 
-# 페이지 기본 설정
 st.set_page_config(
-    page_title="출퇴근기록부 PDF/스캔본 ➡ 엑셀 변환기",
+    page_title="출퇴근기록부 PDF/스캔본 ➡ 엑셀 변환기 (Gemini AI)",
     page_icon="📊",
     layout="wide",
 )
 
+# API Key 설정: Streamlit Secrets에서 가져오거나 사이드바에서 입력받기
+GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
-# --- EasyOCR 모델 로드 (캐싱) ---
-@st.cache_resource
-def load_ocr_reader():
-    # 한글 및 영어 인식 모델 로드
-    return easyocr.Reader(["ko", "en"], gpu=False)
-
-
-reader = load_ocr_reader()
+if not GEMINI_API_KEY:
+    GEMINI_API_KEY = st.sidebar.text_input(
+        "Google Gemini API Key 입력", type="password"
+    )
 
 
-# --- OCR 이미지 분석 및 데이터 파싱 함수 ---
-def parse_attendance_from_image(pil_img):
-    """PIL 이미지를 받아 EasyOCR로 텍스트와 좌표를 분석하여 직원별 출퇴근 기록 구조체로 변환합니다."""
-    img_np = np.array(pil_img)
-    results = reader.readtext(img_np)
+# --- Gemini Vision API 연동 파싱 함수 ---
+def analyze_image_with_gemini(pil_img, api_key):
+    client = genai.Client(api_key=api_key)
 
-    # 인식된 바운딩 박스와 텍스트 정리
-    # results: [([x, y 좌표들], "인식된텍스트", confidence), ...]
+    prompt = """
+    이 이미지는 출퇴근기록부 표입니다.
+    이미지에서 각 직원별로 이름(name), 계약형태(contract_type), 시급(wage), 그리고 1일부터 31일까지의 일자별 출근시간(in)과 퇴근시간(out)을 정확히 인식하여 정규 JSON 배열 형식으로만 응답하세요.
 
-    parsed_data = []
+    [작성 규칙]
+    1. 시간 포맷은 반드시 "HH:MM" 형태로 작성하세요. (예: 08:30, 12:30, 17:30)
+    2. 연차, 반차, 결근 등의 문구가 적혀있거나 근무 기록이 없는 날은 출퇴근시간을 빈 문자열("")로 처리하세요.
+    3. 반차, 연차 문구가 적혀 있는 날이어도 출퇴근시간은 빈 문자열("")로 설정하고 다른 어떠한 글자도 포함하지 마세요.
 
-    # ※ 실제 서식 위치 및 Y축/X축 좌표 분석 logic 예시:
-    # 텍스트들을 Y좌표 기준으로 행(Row) 구분, X좌표 기준으로 열(Column/일자) 구분합니다.
+    [JSON 응답 포맷 구조 예시]
+    [
+      {
+        "name": "천근하",
+        "contract_type": "정규",
+        "wage": 10320,
+        "records": {
+          "1": {"in": "", "out": ""},
+          "2": {"in": "08:30", "out": "12:30"},
+          "3": {"in": "08:30", "out": "12:30"}
+        }
+      }
+    ]
+    """
 
-    # 정규식을 통한 시간 패턴(HH:MM) 매칭
-    time_pattern = re.compile(r"([0-1]?\d|2[0-3]):([0-5]\d)")
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=[pil_img, prompt],
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            temperature=0.1,
+        ),
+    )
 
-    # 예시: OCR 분석된 결과를 직원 객체로 구조화하는 파이프라인
-    # (실제 스캔본 해상도 및 격자 레이아웃에 맞춰 좌표 임계값 조절)
+    result_text = response.text
+    data = json.loads(result_text)
 
-    return parsed_data
+    if isinstance(data, dict):
+        for k in data:
+            if isinstance(data[k], list):
+                return data[k]
+    return data
 
 
-# --- 엑셀 생성 함수 ---
+# --- 엑셀 서식 및 시간 계산 함수 ---
 def create_excel_bytes(year, month, employee_data):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = f"{year}년 {month}월"
 
-    # 스타일 설정
     font_bold = Font(name="맑은 고딕", size=10, bold=True)
     font_title = Font(name="맑은 고딕", size=14, bold=True)
     align_center = Alignment(horizontal="center", vertical="center")
@@ -77,13 +97,11 @@ def create_excel_bytes(year, month, employee_data):
         start_color="FCE4D6", end_color="FCE4D6", fill_type="solid"
     )
 
-    # 1. 제목
     ws.merge_cells("A1:AJ1")
     ws["A1"] = f"팜360닷에이아이 익산지점 생산파트 {year}년 {month}월 출퇴근기록부"
     ws["A1"].font = font_title
     ws["A1"].alignment = align_center
 
-    # 2. 헤더
     headers_left = ["이름", "계약형태", "시급\n(급여/근무시간)", "출/퇴"]
     for i, h in enumerate(headers_left, 1):
         ws.merge_cells(start_row=2, start_column=i, end_row=3, end_column=i)
@@ -112,7 +130,6 @@ def create_excel_bytes(year, month, employee_data):
                 else (fill_sun if dt.weekday() == 6 else fill_header)
             )
 
-    # 3. 데이터 작성 및 시간/OT 자동 계산
     start_row = 4
     for emp in employee_data:
         ws.merge_cells(
@@ -142,12 +159,14 @@ def create_excel_bytes(year, month, employee_data):
         for idx, label in enumerate(type_labels):
             ws.cell(row=start_row + idx, column=4, value=label)
 
+        records_data = emp.get("records", {})
+
         for d in range(1, last_day + 1):
             col_idx = 4 + d
-            records = emp.get("records", {}).get(d, {})
+            day_record = records_data.get(d) or records_data.get(str(d)) or {}
 
-            in_time_str = records.get("in", "")
-            out_time_str = records.get("out", "")
+            in_time_str = day_record.get("in", "")
+            out_time_str = day_record.get("out", "")
 
             ws.cell(row=start_row, column=col_idx, value=in_time_str)
             ws.cell(row=start_row + 1, column=col_idx, value=out_time_str)
@@ -160,7 +179,7 @@ def create_excel_bytes(year, month, employee_data):
                     diff_min = (t_out - t_in).seconds // 60
 
                     if diff_min >= 480:
-                        diff_min -= 60  # 8시간 이상 휴게시간 1시간 차감
+                        diff_min -= 60
 
                     work_str = f"{diff_min // 60}:{diff_min % 60:02d}"
 
@@ -177,7 +196,6 @@ def create_excel_bytes(year, month, employee_data):
 
         start_row += 4
 
-    # 테두리 적용
     for row in ws.iter_rows(
         min_row=2, max_row=start_row - 1, min_col=1, max_col=4 + last_day
     ):
@@ -192,10 +210,9 @@ def create_excel_bytes(year, month, employee_data):
 
 
 # --- Streamlit UI ---
-st.title("📋 출퇴근기록부 PDF/스캔본 ➡ 엑셀 변환기")
+st.title("📋 출퇴근기록부 PDF/스캔본 ➡ 엑셀 변환기 (Gemini AI)")
 
 col1, col2 = st.columns([1, 1])
-
 with col1:
     year = st.number_input("연도 선택", min_value=2020, max_value=2030, value=2026)
     month = st.selectbox("월 선택", list(range(1, 13)), index=7)
@@ -208,51 +225,56 @@ uploaded_file = st.file_uploader(
 if uploaded_file is not None:
     doc = None
     total_pages = 1
-    page_images = []
 
     if uploaded_file.type == "application/pdf":
         pdf_bytes = uploaded_file.read()
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         total_pages = len(doc)
-
         st.info(f"📄 총 {total_pages}페이지의 PDF 문서입니다.")
 
-        # 미리보기용 첫 페이지 로드
         page = doc.load_page(0)
         pix = page.get_pixmap(dpi=150)
         preview_image = Image.open(io.BytesIO(pix.tobytes("png")))
     else:
         preview_image = Image.open(uploaded_file)
-        page_images.append(preview_image)
 
     st.image(
-        preview_image,
-        caption=f"업로드된 문서 미리보기 (1 / {total_pages} 페이지)",
-        use_container_width=True,
+        preview_image, caption="업로드된 문서 미리보기", use_container_width=True
     )
 
-    if st.button("🚀 전체 페이지 OCR 분석 및 엑셀 변환"):
-        all_parsed_employees = []
-
-        with st.spinner("모든 페이지의 글자를 인식 및 파싱하는 중..."):
-            if doc is not None:
-                # PDF 전체 페이지 추출
-                for p in range(total_pages):
-                    page = doc.load_page(p)
-                    pix = page.get_pixmap(dpi=200)  # OCR 정확도를 위해 200 DPI
-                    img = Image.open(io.BytesIO(pix.tobytes("png")))
-                    emp_list = parse_attendance_from_image(img)
-                    all_parsed_employees.extend(emp_list)
-            else:
-                emp_list = parse_attendance_from_image(preview_image)
-                all_parsed_employees.extend(emp_list)
-
-            excel_data = create_excel_bytes(year, month, all_parsed_employees)
-
-            st.success("실제 데이터 기반 엑셀 파일이 생성되었습니다!")
-            st.download_button(
-                label="📥 엑셀 파일 다운로드",
-                data=excel_data,
-                file_name=f"출퇴근기록부_{year}년_{month}월.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    if st.button("🚀 Gemini AI로 문서 분석 및 엑셀 생성"):
+        if not GEMINI_API_KEY:
+            st.error(
+                "Gemini API Key가 설정되지 않았습니다. 사이드바에 키를 입력해 주세요."
             )
+        else:
+            all_parsed_employees = []
+            with st.spinner("Gemini AI가 업로드된 문서 표를 인식 및 파싱하는 중..."):
+                try:
+                    if doc is not None:
+                        for p in range(total_pages):
+                            page = doc.load_page(p)
+                            pix = page.get_pixmap(dpi=150)
+                            img = Image.open(io.BytesIO(pix.tobytes("png")))
+                            emp_list = analyze_image_with_gemini(
+                                img, GEMINI_API_KEY
+                            )
+                            all_parsed_employees.extend(emp_list)
+                    else:
+                        emp_list = analyze_image_with_gemini(
+                            preview_image, GEMINI_API_KEY
+                        )
+                        all_parsed_employees.extend(emp_list)
+
+                    excel_data = create_excel_bytes(
+                        year, month, all_parsed_employees
+                    )
+                    st.success("Gemini AI 분석 완료! 엑셀 파일이 준비되었습니다.")
+                    st.download_button(
+                        label="📥 엑셀 파일 다운로드",
+                        data=excel_data,
+                        file_name=f"출퇴근기록부_{year}년_{month}월.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+                except Exception as e:
+                    st.error(f"Gemini API 호출 중 에러 발생: {e}")
