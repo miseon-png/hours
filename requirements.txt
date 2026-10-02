@@ -2,6 +2,4 @@ streamlit>=1.30.0
 openpyxl>=3.1.0
 pillow>=10.0.0
 PyMuPDF>=1.23.0
-easyocr>=1.7.0
-torch>=2.0.0
-numpy
+google-genai>=0.1.1
