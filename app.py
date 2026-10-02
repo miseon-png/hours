@@ -60,9 +60,9 @@ def analyze_image_with_gemini(pil_img, api_key):
         temperature=0.1,
     )
 
-    # 최신 Gemini 2.0 Flash 모델 적용
+    # 안내된 최신 모델 gemini-3.8-flash 적용
     response = client.models.generate_content(
-        model="gemini-2.0-flash",
+        model="gemini-3.8-flash",
         contents=[pil_img, prompt],
         config=config,
     )
