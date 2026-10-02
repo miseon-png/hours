@@ -1,14 +1,15 @@
 from datetime import datetime
 import io
+import calendar
+from PIL import Image
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from pdf2image import convert_from_bytes
-from PIL import Image
+import pypdfium2 as pdfium
 import streamlit as st
 
 # 페이지 기본 설정
 st.set_page_config(
-    page_title="출퇴근기록부 PDF/이미지 ➡ 엑셀 변환기",
+    page_title="출퇴근기록부 PDF/스캔본 ➡ 엑셀 변환기",
     page_icon="📊",
     layout="wide",
 )
@@ -46,7 +47,7 @@ def create_excel_bytes(year, month, employee_data):
     ws["A1"].font = font_title
     ws["A1"].alignment = align_center
 
-    # 2. 헤더
+    # 2. 헤더 (이름, 계약형태, 시급, 출/퇴)
     headers_left = ["이름", "계약형태", "시급\n(급여/근무시간)", "출/퇴"]
     for i, h in enumerate(headers_left, 1):
         ws.merge_cells(start_row=2, start_column=i, end_row=3, end_column=i)
@@ -55,11 +56,10 @@ def create_excel_bytes(year, month, employee_data):
         cell.alignment = align_center
         cell.fill = fill_header
 
-    import calendar
-
     _, last_day = calendar.monthrange(year, month)
     days_kr = ["월", "화", "수", "목", "금", "토", "일"]
 
+    # 날짜 및 요일 입력
     for d in range(1, last_day + 1):
         col_idx = 4 + d
         dt = datetime(year, month, d)
@@ -77,7 +77,7 @@ def create_excel_bytes(year, month, employee_data):
                 else (fill_sun if dt.weekday() == 6 else fill_header)
             )
 
-    # 3. 데이터 작성 및 시간/OT 자동 계산
+    # 3. 데이터 작성 및 근무/OT시간 자동 계산
     start_row = 4
     for emp in employee_data:
         ws.merge_cells(
@@ -99,9 +99,9 @@ def create_excel_bytes(year, month, employee_data):
             end_column=3,
         )
 
-        ws.cell(row=start_row, column=1, value=emp["name"])
-        ws.cell(row=start_row, column=2, value=emp["contract_type"])
-        ws.cell(row=start_row, column=3, value=emp["wage"])
+        ws.cell(row=start_row, column=1, value=emp.get("name", ""))
+        ws.cell(row=start_row, column=2, value=emp.get("contract_type", ""))
+        ws.cell(row=start_row, column=3, value=emp.get("wage", ""))
 
         type_labels = ["출근", "퇴근", "근무시간", "OT시간"]
         for idx, label in enumerate(type_labels):
@@ -109,7 +109,7 @@ def create_excel_bytes(year, month, employee_data):
 
         for d in range(1, last_day + 1):
             col_idx = 4 + d
-            records = emp["records"].get(d, {})
+            records = emp.get("records", {}).get(d, {})
 
             in_time_str = records.get("in", "")
             out_time_str = records.get("out", "")
@@ -124,10 +124,13 @@ def create_excel_bytes(year, month, employee_data):
                     t_out = datetime.strptime(out_time_str, "%H:%M")
                     diff_min = (t_out - t_in).seconds // 60
 
+                    # 8시간(480분) 이상 근무 시 점심/휴게시간 1시간(60분) 자동 차감 예시
                     if diff_min >= 480:
-                        diff_min -= 60  # 휴게시간 1시간 차감
+                        diff_min -= 60
 
                     work_str = f"{diff_min // 60}:{diff_min % 60:02d}"
+
+                    # 8시간 초과 근무 시 OT 계산
                     if diff_min > 480:
                         ot_min = diff_min - 480
                         ot_str = f"{ot_min // 60}:{ot_min % 60:02d}"
@@ -141,7 +144,7 @@ def create_excel_bytes(year, month, employee_data):
 
         start_row += 4
 
-    # 테두리 적용
+    # 격자 테두리 적용
     for row in ws.iter_rows(
         min_row=2, max_row=start_row - 1, min_col=1, max_col=4 + last_day
     ):
@@ -155,7 +158,7 @@ def create_excel_bytes(year, month, employee_data):
     return output.getvalue()
 
 
-# --- Streamlit UI 구성 ---
+# --- Streamlit UI ---
 st.title("📋 출퇴근기록부 PDF/스캔본 ➡ 엑셀 변환기")
 st.write(
     "PDF 또는 스캔 이미지 형태의 출퇴근기록부를 업로드하면 근무시간과 OT시간을 자동 계산하여 동일한 양식의 엑셀 파일로 변환합니다."
@@ -167,7 +170,6 @@ with col1:
     year = st.number_input("연도 선택", min_value=2020, max_value=2030, value=2026)
     month = st.selectbox("월 선택", list(range(1, 13)), index=7)
 
-# PDF 및 이미지 파일 업로드 확장자 추가 (.pdf)
 uploaded_file = st.file_uploader(
     "출퇴근기록부 PDF 또는 스캔 이미지 업로드",
     type=["pdf", "png", "jpg", "jpeg"],
@@ -176,17 +178,16 @@ uploaded_file = st.file_uploader(
 if uploaded_file is not None:
     preview_image = None
 
-    # PDF인 경우 첫 페이지를 이미지로 변환
+    # PDF 인 경우 pypdfium2 라이브러리로 첫 페이지 이미지 변환
     if uploaded_file.type == "application/pdf":
         try:
             pdf_bytes = uploaded_file.read()
-            images = convert_from_bytes(pdf_bytes, first_page=1, last_page=1)
-            if images:
-                preview_image = images[0]
+            pdf = pdfium.PdfDocument(pdf_bytes)
+            page = pdf[0]  # 첫 번째 페이지
+            image_bitmap = page.render(scale=2)  # 선명도 조절
+            preview_image = image_bitmap.to_pil()
         except Exception as e:
-            st.error(
-                f"PDF를 이미지로 변환하는 중 오류가 발생했습니다. (poppler 설치 여부를 확인하세요): {e}"
-            )
+            st.error(f"PDF를 이미지로 변환하는 중 오류가 발생했습니다: {e}")
     else:
         preview_image = Image.open(uploaded_file)
 
@@ -199,7 +200,8 @@ if uploaded_file is not None:
 
         if st.button("🚀 엑셀 파일 생성하기"):
             with st.spinner("문서 인식 및 시간/OT 자동 계산 중..."):
-                # TODO: OCR API(Google Cloud Vision/Naver CLOVA 등)에 preview_image를 전달하여 추출
+                # TODO: OCR API(예: Naver CLOVA OCR 또는 Google Cloud Vision) 연동 시
+                # preview_image 변수를 OCR 모델에 전달하여 파싱 데이터를 가져옵니다.
                 sample_parsed_data = [
                     {
                         "name": "천근하",
