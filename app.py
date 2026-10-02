@@ -17,18 +17,35 @@ st.set_page_config(
     layout="wide",
 )
 
-# 기본 API 키 및 Secrets 연동
+# 기본 API 키 하드코딩 백업
 DEFAULT_KEYS = [
     "AQ.Ab8RN6JtWgAd1P_oAikhVoxK0pwySrPvcF0ojsyk6L5_MWtWnA",
+    "AQ.Ab8RN6I1kMqkBFXIW7C9_kKZ0didxiBHEYaPXpBHnjL2lQ4mLg",
+    "AQ.Ab8RN6KZPGB7kTBoKBi6a5w-n1t87bu4ipgzgWtzfZeAJVdWgA",
+    "AQ.Ab8RN6KaE_FVBxrOw91Tr6OX1qIcUmoZwGyFHzLJEC5qQQI_Tw",
 ]
 
-secrets_keys = st.secrets.get("GEMINI_API_KEYS", None)
-if not secrets_keys:
-    single_key = st.secrets.get("GEMINI_API_KEY", None)
-    secrets_keys = [single_key] if single_key else DEFAULT_KEYS
 
-# 빈 값이나 잘못된 형식을 걸러낸 유효 키 목록
-API_KEYS = [k.strip() for k in secrets_keys if k and isinstance(k, str)]
+# Secrets에서 안정적으로 API Key 목록 추출하는 함수 (안전장치)
+def get_safe_api_keys():
+    try:
+        raw_keys = st.secrets.get("GEMINI_API_KEYS", None)
+        if not raw_keys:
+            raw_keys = st.secrets.get("GEMINI_API_KEY", None)
+
+        if isinstance(raw_keys, list):
+            return [k.strip() for k in raw_keys if k and k.strip()]
+        elif isinstance(raw_keys, str):
+            # 줄바꿈이나 쉼표로 구분된 경우 처리
+            lines = raw_keys.replace(",", "\n").split("\n")
+            keys = [k.strip() for k in lines if k and k.strip()]
+            return keys if keys else DEFAULT_KEYS
+    except Exception:
+        pass
+    return DEFAULT_KEYS
+
+
+API_KEYS = get_safe_api_keys()
 
 
 def compress_image_for_fast_api(pil_img, max_width=1024):
@@ -56,12 +73,12 @@ def analyze_image_fast(pil_img, api_keys):
 
     last_exception = None
 
-    # 키 리스트 전체를 시도
+    # 등록된 키 순회
     for idx, key in enumerate(api_keys, 1):
         try:
             client = genai.Client(api_key=key)
             response = client.models.generate_content(
-                model="gemini-2.5-flash",  # 구글 정식 지원 최신 모델
+                model="gemini-2.5-flash",
                 contents=[fast_img, prompt],
                 config=config,
             )
@@ -74,14 +91,16 @@ def analyze_image_fast(pil_img, api_keys):
                 return data
         except Exception as e:
             last_exception = e
-            err_msg = str(e)
-
-            # 에러 감지 시 어떤 에러든 다음 키로 자동 스위칭 시도
-            st.toast(f"⚠️ Key #{idx} 오류 감지 ({err_msg[:40]}...). 다음 키로 시도합니다.")
+            # 한도 초과나 기타 에러 발생 시 알림 표시 후 다음 키로 전환
+            st.toast(
+                f"⚠️ Key #{idx} 호출 실패. 다음 예비 키로 시도합니다."
+            )
             time.sleep(0.5)
             continue
 
-    raise Exception(f"모든 API 키 호출이 실패했습니다. (마지막 에러: {last_exception})")
+    raise Exception(
+        f"등록된 모든 API Key의 호출이 실패했습니다. (마지막 에러: {last_exception})"
+    )
 
 
 def create_excel_bytes(year, month, employee_data):
@@ -98,9 +117,15 @@ def create_excel_bytes(year, month, employee_data):
         left=border_thin, right=border_thin, top=border_thin, bottom=border_thin
     )
 
-    fill_header = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
-    fill_sat = PatternFill(start_color="DCE6F1", end_color="DCE6F1", fill_type="solid")
-    fill_sun = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+    fill_header = PatternFill(
+        start_color="F2F2F2", end_color="F2F2F2", fill_type="solid"
+    )
+    fill_sat = PatternFill(
+        start_color="DCE6F1", end_color="DCE6F1", fill_type="solid"
+    )
+    fill_sun = PatternFill(
+        start_color="FCE4D6", end_color="FCE4D6", fill_type="solid"
+    )
 
     ws.merge_cells("A1:AJ1")
     ws["A1"] = f"팜360닷에이아이 익산지점 생산파트 {year}년 {month}월 출퇴근기록부"
@@ -130,14 +155,31 @@ def create_excel_bytes(year, month, employee_data):
             c.font = font_bold
             c.alignment = align_center
             c.fill = (
-                fill_sat if dt.weekday() == 5 else (fill_sun if dt.weekday() == 6 else fill_header)
+                fill_sat
+                if dt.weekday() == 5
+                else (fill_sun if dt.weekday() == 6 else fill_header)
             )
 
     start_row = 4
     for emp in employee_data:
-        ws.merge_cells(start_row=start_row, start_column=1, end_row=start_row + 3, end_column=1)
-        ws.merge_cells(start_row=start_row, start_column=2, end_row=start_row + 3, end_column=2)
-        ws.merge_cells(start_row=start_row, start_column=3, end_row=start_row + 3, end_column=3)
+        ws.merge_cells(
+            start_row=start_row,
+            start_column=1,
+            end_row=start_row + 3,
+            end_column=1,
+        )
+        ws.merge_cells(
+            start_row=start_row,
+            start_column=2,
+            end_row=start_row + 3,
+            end_column=2,
+        )
+        ws.merge_cells(
+            start_row=start_row,
+            start_column=3,
+            end_row=start_row + 3,
+            end_column=3,
+        )
 
         ws.cell(row=start_row, column=1, value=emp.get("name", ""))
         ws.cell(row=start_row, column=2, value=emp.get("contract_type", ""))
@@ -244,7 +286,9 @@ if uploaded_file is not None:
                     emp_list = analyze_image_fast(preview_image, API_KEYS)
                     all_parsed_employees.extend(emp_list)
 
-                excel_data = create_excel_bytes(year, month, all_parsed_employees)
+                excel_data = create_excel_bytes(
+                    year, month, all_parsed_employees
+                )
                 st.success("파싱 완료!")
                 st.download_button(
                     label="📥 엑셀 파일 다운로드",
