@@ -20,9 +20,8 @@ st.set_page_config(
 # 기본 제공 4개 키 (Secrets에 설정된 값이 있다면 그것을 최우선으로 사용)
 DEFAULT_KEYS = [
     "AQ.Ab8RN6JtWgAd1P_oAikhVoxK0pwySrPvcF0ojsyk6L5_MWtWnA",
-    "AQ.Ab8RN6I1kMqkBFXIW7C9_kKZ0didxiBHEYaPXpBHnjL2lQ4mLg",
-    "AQ.Ab8RN6KZPGB7kTBoKBi6a5w-n1t87bu4ipgzgWtzfZeAJVdWgA",
-    "AQ.Ab8RN6KaE_FVBxrOw91Tr6OX1qIcUmoZwGyFHzLJEC5qQQI_Tw",
+    "AQ.Ab8RN6J8OMxJlgeLoy0sDobVRL3_osnUmki1fehRQbIwF9E-cg",
+
 ]
 
 # Secrets 로드 (복수형 GEMINI_API_KEYS 또는 단일 GEMINI_API_KEY 대응)
