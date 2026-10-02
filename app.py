@@ -2,6 +2,7 @@ import calendar
 from datetime import datetime
 import io
 import json
+import time
 import fitz  # PyMuPDF
 from google import genai
 from google.genai import types
@@ -24,7 +25,7 @@ GEMINI_API_KEY = st.secrets.get(
 )
 
 
-# --- Gemini Vision API 연동 ---
+# --- Gemini Vision API 연동 (503 장애 자동 우회 및 재시도 로직) ---
 def analyze_image_with_gemini(pil_img, api_key):
     client = genai.Client(api_key=api_key)
 
@@ -60,22 +61,48 @@ def analyze_image_with_gemini(pil_img, api_key):
         temperature=0.1,
     )
 
-    # 안내된 최신 모델 gemini-3.8-flash 적용
-    response = client.models.generate_content(
-        model="gemini-3.8-flash",
-        contents=[pil_img, prompt],
-        config=config,
+    # 503 트래픽 과부하 시 순차적 우회 시도할 모델 리스트
+    candidate_models = [
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-1.5-pro",
+    ]
+
+    last_exception = None
+
+    for model_name in candidate_models:
+        # 모델당 최대 3회 재시도 (Exponential Backoff)
+        for attempt in range(3):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=[pil_img, prompt],
+                    config=config,
+                )
+                if response and response.text:
+                    data = json.loads(response.text)
+                    if isinstance(data, dict):
+                        for k in data:
+                            if isinstance(data[k], list):
+                                return data[k]
+                    return data
+            except Exception as e:
+                last_exception = e
+                err_msg = str(e)
+                # 503 UNAVAILABLE 또는 과부하인 경우 2초 지연 후 재시도
+                if "503" in err_msg or "UNAVAILABLE" in err_msg:
+                    time.sleep(2)
+                    continue
+                # 모델 이름 오류(404)인 경우 다음 우회 모델로 즉시 전환
+                elif "404" in err_msg or "NOT_FOUND" in err_msg:
+                    break
+                else:
+                    raise e
+
+    raise Exception(
+        f"구글 AI 서버 전체에 일시적인 트래픽 폭주가 있습니다. (최종 에러: {last_exception})"
     )
-
-    if not response or not response.text:
-        raise Exception("Gemini AI로부터 응답을 받지 못했습니다.")
-
-    data = json.loads(response.text)
-    if isinstance(data, dict):
-        for k in data:
-            if isinstance(data[k], list):
-                return data[k]
-    return data
 
 
 # --- 엑셀 작성 및 자동 시간/OT 계산 함수 ---
@@ -261,7 +288,9 @@ if uploaded_file is not None:
             )
         else:
             all_parsed_employees = []
-            with st.spinner("Gemini AI가 문서를 정밀하게 분석하는 중입니다..."):
+            with st.spinner(
+                "Gemini AI가 문서를 정밀하게 분석 중입니다 (트래픽 상태 감지 및 자동 우회 중)..."
+            ):
                 try:
                     if doc is not None:
                         for p in range(total_pages):
