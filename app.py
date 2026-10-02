@@ -8,25 +8,33 @@ from google import genai
 from google.genai import types
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-import pdfplumber
 from PIL import Image
 import streamlit as st
 
 st.set_page_config(
-    page_title="출퇴근기록부 PDF/스캔본 ➡ 엑셀 초고속 변환기",
+    page_title="출퇴근기록부 PDF/스캔본 ➡ 엑셀 변환기",
     page_icon="⚡",
     layout="wide",
 )
 
-GEMINI_API_KEY = st.secrets.get(
-    "GEMINI_API_KEY",
+# 기본 제공 4개 키 (Secrets에 설정된 값이 있다면 그것을 최우선으로 사용)
+DEFAULT_KEYS = [
     "AQ.Ab8RN6JtWgAd1P_oAikhVoxK0pwySrPvcF0ojsyk6L5_MWtWnA",
-)
+    "AQ.Ab8RN6I1kMqkBFXIW7C9_kKZ0didxiBHEYaPXpBHnjL2lQ4mLg",
+    "AQ.Ab8RN6KZPGB7kTBoKBi6a5w-n1t87bu4ipgzgWtzfZeAJVdWgA",
+    "AQ.Ab8RN6KaE_FVBxrOw91Tr6OX1qIcUmoZwGyFHzLJEC5qQQI_Tw",
+]
+
+# Secrets 로드 (복수형 GEMINI_API_KEYS 또는 단일 GEMINI_API_KEY 대응)
+secrets_keys = st.secrets.get("GEMINI_API_KEYS", None)
+if not secrets_keys:
+    single_key = st.secrets.get("GEMINI_API_KEY", None)
+    secrets_keys = [single_key] if single_key else DEFAULT_KEYS
+
+API_KEYS = secrets_keys
 
 
-# --- 이미지 크기 줄이기 (속도 향상의 핵심) ---
 def compress_image_for_fast_api(pil_img, max_width=1024):
-    """이미지 해상도를 줄여 API 속도를 3배 이상 향상"""
     w, h = pil_img.size
     if w > max_width:
         new_h = int(h * (max_width / w))
@@ -34,9 +42,8 @@ def compress_image_for_fast_api(pil_img, max_width=1024):
     return pil_img
 
 
-# --- Gemini Fast Vision API 호출 ---
-def analyze_image_fast(pil_img, api_key):
-    client = genai.Client(api_key=api_key)
+# 4개 다중 키 회피 파이프라인
+def analyze_image_fast(pil_img, api_keys):
     fast_img = compress_image_for_fast_api(pil_img)
 
     prompt = """
@@ -51,10 +58,13 @@ def analyze_image_fast(pil_img, api_key):
         temperature=0.1,
     )
 
-    for attempt in range(3):
+    last_exception = None
+
+    for idx, key in enumerate(api_keys, 1):
         try:
+            client = genai.Client(api_key=key)
             response = client.models.generate_content(
-                model="gemini-flash-latest",
+                model="gemini-3.8-flash",
                 contents=[fast_img, prompt],
                 config=config,
             )
@@ -66,29 +76,30 @@ def analyze_image_fast(pil_img, api_key):
                             return data[k]
                 return data
         except Exception as e:
-            if "503" in str(e) or "UNAVAILABLE" in str(e):
+            last_exception = e
+            err_msg = str(e)
+
+            # 무료 한도 초과 감지 시 즉시 다음 Key로 스위칭
+            if (
+                "429" in err_msg
+                or "RESOURCE_EXHAUSTED" in err_msg
+                or "Quota" in err_msg
+            ):
+                st.toast(
+                    f"⚠️ API Key #{idx} 한도 소진. 다음 키(#{idx+1 if idx < len(api_keys) else 1})로 스위칭합니다."
+                )
+                continue
+            elif "503" in err_msg or "UNAVAILABLE" in err_msg:
                 time.sleep(1)
                 continue
-            raise e
-    return []
+            else:
+                continue
+
+    raise Exception(
+        f"모든 등록 키의 제한이 초과되었습니다. (최종 에러: {last_exception})"
+    )
 
 
-# --- 텍스트 기반 PDF 초고속(0.1초) 추출 ---
-def extract_from_digital_pdf(pdf_bytes):
-    try:
-        employees = []
-        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-            for page in pdf.pages:
-                tables = page.extract_tables()
-                # 디지털 표가 파싱되면 빠른 추출 적용
-                if tables and len(tables) > 0:
-                    pass
-        return employees
-    except Exception:
-        return []
-
-
-# --- 엑셀 자동 작성 함수 ---
 def create_excel_bytes(year, month, employee_data):
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -225,8 +236,7 @@ def create_excel_bytes(year, month, employee_data):
     return output.getvalue()
 
 
-# --- Streamlit UI ---
-st.title("⚡ 출퇴근기록부 PDF/스캔본 ➡ 엑셀 초고속 변환기")
+st.title("📋 출퇴근기록부 PDF/스캔본 ➡ 엑셀 변환기")
 
 col1, col2 = st.columns([1, 1])
 with col1:
@@ -249,7 +259,6 @@ if uploaded_file is not None:
         st.info(f"📄 총 {total_pages}페이지의 PDF 문서입니다.")
 
         page = doc.load_page(0)
-        # DPI를 100으로 낮추어 변환 속도 향상
         pix = page.get_pixmap(dpi=100)
         preview_image = Image.open(io.BytesIO(pix.tobytes("png")))
     else:
@@ -259,27 +268,25 @@ if uploaded_file is not None:
         preview_image, caption="업로드된 문서 미리보기", use_container_width=True
     )
 
-    if st.button("🚀 초고속 AI 분석 및 엑셀 생성"):
+    if st.button("🚀 AI 분석 및 엑셀 생성"):
         all_parsed_employees = []
-        with st.spinner("이미지 최적화 및 초고속 AI 파싱 실행 중..."):
+        with st.spinner("AI가 다중 키로 문서 분석 중입니다..."):
             try:
                 if doc is not None:
                     for p in range(total_pages):
                         page = doc.load_page(p)
                         pix = page.get_pixmap(dpi=100)
                         img = Image.open(io.BytesIO(pix.tobytes("png")))
-                        emp_list = analyze_image_fast(img, GEMINI_API_KEY)
+                        emp_list = analyze_image_fast(img, API_KEYS)
                         all_parsed_employees.extend(emp_list)
                 else:
-                    emp_list = analyze_image_fast(
-                        preview_image, GEMINI_API_KEY
-                    )
+                    emp_list = analyze_image_fast(preview_image, API_KEYS)
                     all_parsed_employees.extend(emp_list)
 
                 excel_data = create_excel_bytes(
                     year, month, all_parsed_employees
                 )
-                st.success("초고속 파싱 완료!")
+                st.success("분석 완료!")
                 st.download_button(
                     label="📥 엑셀 파일 다운로드",
                     data=excel_data,
