@@ -2,7 +2,6 @@ import calendar
 from datetime import datetime
 import io
 import json
-import time
 import fitz  # PyMuPDF
 from google import genai
 from google.genai import types
@@ -17,35 +16,19 @@ st.set_page_config(
     layout="wide",
 )
 
-# 기본 API 키 하드코딩 백업
-DEFAULT_KEYS = [
-    "AQ.Ab8RN6JtWgAd1P_oAikhVoxK0pwySrPvcF0ojsyk6L5_MWtWnA",
-    "AQ.Ab8RN6I1kMqkBFXIW7C9_kKZ0didxiBHEYaPXpBHnjL2lQ4mLg",
-    "AQ.Ab8RN6KZPGB7kTBoKBi6a5w-n1t87bu4ipgzgWtzfZeAJVdWgA",
-    "AQ.Ab8RN6KaE_FVBxrOw91Tr6OX1qIcUmoZwGyFHzLJEC5qQQI_Tw",
-]
+st.title("📋 출퇴근기록부 PDF/스캔본 ➡ 엑셀 변환기")
 
+# 사이드바에서 사용할 API 키 직접 입력받기
+st.sidebar.header("🔑 Gemini API Key 설정")
+user_api_key = st.sidebar.text_input(
+    "Google AI Studio에서 새로 받은 API Key 입력",
+    type="password",
+    help="aistudio.google.com에서 발급받은 키를 여기에 붙여넣으세요.",
+)
 
-# Secrets에서 안정적으로 API Key 목록 추출하는 함수 (안전장치)
-def get_safe_api_keys():
-    try:
-        raw_keys = st.secrets.get("GEMINI_API_KEYS", None)
-        if not raw_keys:
-            raw_keys = st.secrets.get("GEMINI_API_KEY", None)
-
-        if isinstance(raw_keys, list):
-            return [k.strip() for k in raw_keys if k and k.strip()]
-        elif isinstance(raw_keys, str):
-            # 줄바꿈이나 쉼표로 구분된 경우 처리
-            lines = raw_keys.replace(",", "\n").split("\n")
-            keys = [k.strip() for k in lines if k and k.strip()]
-            return keys if keys else DEFAULT_KEYS
-    except Exception:
-        pass
-    return DEFAULT_KEYS
-
-
-API_KEYS = get_safe_api_keys()
+# Secrets에 등록된 키가 있다면 자동 로드
+secrets_key = st.secrets.get("GEMINI_API_KEY", "")
+ACTIVE_KEY = user_api_key if user_api_key else secrets_key
 
 
 def compress_image_for_fast_api(pil_img, max_width=1024):
@@ -56,7 +39,8 @@ def compress_image_for_fast_api(pil_img, max_width=1024):
     return pil_img
 
 
-def analyze_image_fast(pil_img, api_keys):
+def analyze_image_with_key(pil_img, api_key):
+    client = genai.Client(api_key=api_key)
     fast_img = compress_image_for_fast_api(pil_img)
 
     prompt = """
@@ -71,36 +55,21 @@ def analyze_image_fast(pil_img, api_keys):
         temperature=0.1,
     )
 
-    last_exception = None
-
-    # 등록된 키 순회
-    for idx, key in enumerate(api_keys, 1):
-        try:
-            client = genai.Client(api_key=key)
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=[fast_img, prompt],
-                config=config,
-            )
-            if response and response.text:
-                data = json.loads(response.text)
-                if isinstance(data, dict):
-                    for k in data:
-                        if isinstance(data[k], list):
-                            return data[k]
-                return data
-        except Exception as e:
-            last_exception = e
-            # 한도 초과나 기타 에러 발생 시 알림 표시 후 다음 키로 전환
-            st.toast(
-                f"⚠️ Key #{idx} 호출 실패. 다음 예비 키로 시도합니다."
-            )
-            time.sleep(0.5)
-            continue
-
-    raise Exception(
-        f"등록된 모든 API Key의 호출이 실패했습니다. (마지막 에러: {last_exception})"
+    # 최신 가용한 3.8 Flash 모델 사용
+    response = client.models.generate_content(
+        model="gemini-3.8-flash",
+        contents=[fast_img, prompt],
+        config=config,
     )
+
+    if response and response.text:
+        data = json.loads(response.text)
+        if isinstance(data, dict):
+            for k in data:
+                if isinstance(data[k], list):
+                    return data[k]
+        return data
+    return []
 
 
 def create_excel_bytes(year, month, employee_data):
@@ -239,8 +208,6 @@ def create_excel_bytes(year, month, employee_data):
     return output.getvalue()
 
 
-st.title("📋 출퇴근기록부 PDF/스캔본 ➡ 엑셀 변환기")
-
 col1, col2 = st.columns([1, 1])
 with col1:
     year = st.number_input("연도 선택", min_value=2020, max_value=2030, value=2026)
@@ -272,29 +239,36 @@ if uploaded_file is not None:
     )
 
     if st.button("🚀 AI 분석 및 엑셀 생성"):
-        all_parsed_employees = []
-        with st.spinner("AI 분석 진행 중..."):
-            try:
-                if doc is not None:
-                    for p in range(total_pages):
-                        page = doc.load_page(p)
-                        pix = page.get_pixmap(dpi=100)
-                        img = Image.open(io.BytesIO(pix.tobytes("png")))
-                        emp_list = analyze_image_fast(img, API_KEYS)
+        if not ACTIVE_KEY:
+            st.error(
+                "❌ API Key가 비어있습니다. 왼쪽 사이드바에 새 API Key를 입력하세요!"
+            )
+        else:
+            all_parsed_employees = []
+            with st.spinner("AI 분석 진행 중..."):
+                try:
+                    if doc is not None:
+                        for p in range(total_pages):
+                            page = doc.load_page(p)
+                            pix = page.get_pixmap(dpi=100)
+                            img = Image.open(io.BytesIO(pix.tobytes("png")))
+                            emp_list = analyze_image_with_key(img, ACTIVE_KEY)
+                            all_parsed_employees.extend(emp_list)
+                    else:
+                        emp_list = analyze_image_with_key(
+                            preview_image, ACTIVE_KEY
+                        )
                         all_parsed_employees.extend(emp_list)
-                else:
-                    emp_list = analyze_image_fast(preview_image, API_KEYS)
-                    all_parsed_employees.extend(emp_list)
 
-                excel_data = create_excel_bytes(
-                    year, month, all_parsed_employees
-                )
-                st.success("파싱 완료!")
-                st.download_button(
-                    label="📥 엑셀 파일 다운로드",
-                    data=excel_data,
-                    file_name=f"출퇴근기록부_{year}년_{month}월.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
-            except Exception as e:
-                st.error(f"오류: {e}")
+                    excel_data = create_excel_bytes(
+                        year, month, all_parsed_employees
+                    )
+                    st.success("🎉 성공적으로 분석이 완료되었습니다!")
+                    st.download_button(
+                        label="📥 엑셀 파일 다운로드",
+                        data=excel_data,
+                        file_name=f"출퇴근기록부_{year}년_{month}월.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+                except Exception as e:
+                    st.error(f"실패 원인: {e}")
