@@ -24,7 +24,7 @@ GEMINI_API_KEY = st.secrets.get(
 )
 
 
-# --- Gemini Vision API를 이용한 문서 분석 파이프라인 ---
+# --- Gemini Vision API 연동 (503 트래픽 장애 대비 Fallback 적용) ---
 def analyze_image_with_gemini(pil_img, api_key):
     client = genai.Client(api_key=api_key)
 
@@ -55,15 +55,34 @@ def analyze_image_with_gemini(pil_img, api_key):
     ]
     """
 
-    # 권장 모델인 gemini-3.8-flash 적용
-    response = client.models.generate_content(
-        model="gemini-3.8-flash",
-        contents=[pil_img, prompt],
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            temperature=0.1,
-        ),
+    config = types.GenerateContentConfig(
+        response_mime_type="application/json",
+        temperature=0.1,
     )
+
+    # 503 에러 발생 대비 순차적 모델 시도 (Fallback)
+    models_to_try = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash"]
+    response = None
+
+    for model_name in models_to_try:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=[pil_img, prompt],
+                config=config,
+            )
+            if response and response.text:
+                break
+        except Exception as e:
+            if "503" in str(e) or "UNAVAILABLE" in str(e):
+                continue  # 다음 대체 모델로 재시도
+            else:
+                raise e
+
+    if not response or not response.text:
+        raise Exception(
+            "현재 구글 Gemini 서버 트래픽 폭주로 응답이 지연되고 있습니다. 잠시 후 다시 시도해 주세요."
+        )
 
     data = json.loads(response.text)
     if isinstance(data, dict):
