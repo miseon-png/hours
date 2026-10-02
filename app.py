@@ -17,7 +17,7 @@ st.set_page_config(
     layout="wide",
 )
 
-# Streamlit Secrets 또는 코드 내 정의된 API Key 로드
+# Secrets 또는 기본 API Key 로드
 GEMINI_API_KEY = st.secrets.get(
     "GEMINI_API_KEY",
     "AQ.Ab8RN6JtWgAd1P_oAikhVoxK0pwySrPvcF0ojsyk6L5_MWtWnA",
@@ -55,12 +55,13 @@ def analyze_image_with_gemini(pil_img, api_key):
     ]
     """
 
+    # 권장 모델인 gemini-3.8-flash 적용
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.8-flash",
         contents=[pil_img, prompt],
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
-            temperature=0.1,  # 정밀도 조절
+            temperature=0.1,
         ),
     )
 
@@ -78,7 +79,6 @@ def create_excel_bytes(year, month, employee_data):
     ws = wb.active
     ws.title = f"{year}년 {month}월"
 
-    # 스타일 설정
     font_bold = Font(name="맑은 고딕", size=10, bold=True)
     font_title = Font(name="맑은 고딕", size=14, bold=True)
     align_center = Alignment(horizontal="center", vertical="center")
