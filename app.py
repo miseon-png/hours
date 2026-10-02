@@ -13,12 +13,12 @@ st.set_page_config(
 
 st.title("📊 출퇴근기록부 엑셀 서식 자동 변환기")
 st.write(
-    "Gemini에서 추출한 원본 엑셀 파일을 업로드하시면 예쁜 서식과 근무/OT시간이 자동 계산된 엑셀로 변환해 드립니다."
+    "Gemini에서 추출한 원본 엑셀 파일(.xlsx)을 업로드하시면 서식 정리 및 근무/OT시간(저녁 휴게시간 30분 포함)이 자동 계산된 엑셀로 변환해 드립니다."
 )
 
 
 def process_excel(file_bytes, year, month):
-    # 1. 업로드된 파일 바이트 읽기
+    # 1. 업로드된 엑셀 파일 로드
     wb_in = openpyxl.load_workbook(io.BytesIO(file_bytes))
     ws_in = wb_in.active
 
@@ -45,7 +45,7 @@ def process_excel(file_bytes, year, month):
             data_map[emp_name] = {}
         data_map[emp_name][day_num] = {"in": in_str, "out": out_str}
 
-    # 직원 계약 및 시급 정보
+    # 직원 기본정보 매핑 (계약형태, 시급)
     emp_info_dict = {
         "천근하": ("정규", 10320),
         "김란님": ("정규", 11279),
@@ -87,7 +87,7 @@ def process_excel(file_bytes, year, month):
 
     _, last_day = calendar.monthrange(year, month)
 
-    # 상단 제목
+    # 상단 메인 제목 생성 (A1:AJ1)
     ws_out.merge_cells(
         start_row=1, start_column=1, end_row=1, end_column=4 + last_day
     )
@@ -97,7 +97,7 @@ def process_excel(file_bytes, year, month):
     ws_out["A1"].font = font_title
     ws_out["A1"].alignment = align_center
 
-    # 헤더 작성
+    # 헤더 작성 (이름, 계약형태, 시급, 출/퇴)
     headers_left = ["이름", "계약형태", "시급\n(급여/근무시간)", "출/퇴"]
     for i, h in enumerate(headers_left, 1):
         ws_out.merge_cells(start_row=2, start_column=i, end_row=3, end_column=i)
@@ -178,17 +178,22 @@ def process_excel(file_bytes, year, month):
                 try:
                     t1 = datetime.strptime(in_t, "%H:%M")
                     t2 = datetime.strptime(out_t, "%H:%M")
-                    diff = (t2 - t1).seconds // 60
+                    diff_min = (t2 - t1).seconds // 60
 
-                    # 8시간 이상 시 휴게시간 1시간(60분) 차감
-                    if diff >= 480:
-                        diff -= 60
+                    # 1. 점심 휴게시간 차감 (8시간 이상 근무 시 60분 공제)
+                    if diff_min >= 480:
+                        diff_min -= 60
 
-                    work_str = f"{diff // 60}:{diff % 60:02d}"
+                    # 2. 저녁 연장근무 휴게시간 차감 (17:30 이후 퇴근 시 저녁식사 30분 추가 공제)
+                    if diff_min > 420 and t2.hour >= 18:
+                        diff_min -= 30
 
-                    if diff > 480:
-                        ot_m = diff - 480
-                        ot_str = f"{ot_m // 60}:{ot_m % 60:02d}"
+                    work_str = f"{diff_min // 60}:{diff_min % 60:02d}"
+
+                    # OT(연장근무) 시간 산출 (정규 8시간=480분 초과분)
+                    if diff_min > 480:
+                        ot_min = diff_min - 480
+                        ot_str = f"{ot_min // 60}:{ot_min % 60:02d}"
                     else:
                         ot_str = "0:00"
                 except Exception:
@@ -205,7 +210,7 @@ def process_excel(file_bytes, year, month):
 
         start_row += 4
 
-    # 격자 테두리 적용
+    # 전체 격자 테두리 적용
     for row in ws_out.iter_rows(
         min_row=2, max_row=start_row - 1, min_col=1, max_col=4 + last_day
     ):
